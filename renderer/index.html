@@ -1,0 +1,168 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <!--
+    CSP：只允许加载本应用自己的资源。
+    这是"完全离线"（spec FR-6.1）的第一道闸；第二道在主进程的 webRequest 拦截。
+    不写 'unsafe-inline'，也不列任何远程来源。
+  -->
+  <meta http-equiv="Content-Security-Policy"
+        content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'none'" />
+  <title>元器件管理</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <div class="layout">
+    <aside class="sidebar">
+      <div class="brand">元器件管理</div>
+      <nav>
+        <button type="button" class="nav active" data-page="inventory">库存</button>
+        <button type="button" class="nav" data-page="import">导入 BOM</button>
+        <button type="button" class="nav" data-page="compare">比对</button>
+        <button type="button" class="nav" data-page="parts">手动录入</button>
+        <button type="button" class="nav" data-page="stock">领料</button>
+        <button type="button" class="nav" data-page="settings">设置</button>
+        <button type="button" class="nav" data-page="backup">备份</button>
+      <button type="button" class="nav" data-page="statement">按对账单入库</button>
+      </nav>
+      <div class="sidebar-foot">
+        <div id="offline-badge" class="badge">完全离线</div>
+        <div id="status" class="status">正在加载…</div>
+      </div>
+    </aside>
+
+    <main id="content">
+      <!-- 库存页 -->
+      <section id="page-inventory" class="page">
+        <header class="page-head">
+          <h1>库存</h1>
+          <div class="actions">
+            <input id="search" type="search" placeholder="搜索 值 / 封装 / 型号 / 库位…" />
+            <button id="refresh" type="button">刷新</button>
+            <button id="export-library" type="button" title="把当前库导出成 xlsx（FR-5.5）">导出库表</button>
+          </div>
+        </header>
+
+        <!-- FR-4.3：启动时若有低库存器件，显示**一次**汇总提示（由 app.js 填） -->
+        <div id="startup-notice" class="banner warn" hidden></div>
+
+        <div class="summary">
+          <div class="card"><div class="label">器件总数</div><div class="value" id="stat-parts">—</div></div>
+          <div class="card"><div class="label">低库存</div><div class="value warn" id="stat-low">—</div></div>
+          <div class="card"><div class="label">变动记录</div><div class="value" id="stat-moves">—</div></div>
+          <div class="card wide"><div class="label">数据目录</div><div class="value path" id="stat-dir">—</div></div>
+        </div>
+
+        <div class="panel">
+          <table id="parts">
+            <thead>
+              <!-- 表头可点击排序（FR-5.1：再点一次反向） -->
+              <tr>
+                <th class="sortable" data-field="value">值</th>
+                <th class="sortable" data-field="footprint">封装</th>
+                <th class="sortable" data-field="voltage">耐压</th>
+                <th class="sortable" data-field="dielectric">材质</th>
+                <th class="sortable" data-field="tolerance">容差</th>
+                <th class="sortable" data-field="category">分类</th>
+                <th class="sortable" data-field="part_number">型号</th>
+                <th class="sortable" data-field="manufacturer">厂商</th>
+                <th class="sortable num" data-field="quantity">数量</th>
+                <th class="sortable" data-field="location">库位</th>
+                <th>操作</th>
+              </tr>
+            </thead>
+            <tbody id="parts-body">
+              <tr><td colspan="11" class="empty">加载中…</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <div class="foot">
+          <span id="low-summary" class="warn"></span>
+        </div>
+      </section>
+
+      <!-- 导入 BOM 页（三步向导，由 pages/import_wizard.js 装配） -->
+      <section id="page-import" class="page" hidden>
+        <header class="page-head">
+          <h1>导入 BOM</h1>
+          <div class="actions"><span class="hint">入库前必须逐条人工核对 —— 这是唯一的入库通道</span></div>
+        </header>
+        <div id="import-wizard"></div>
+      </section>
+
+      <!-- 比对页（只读；由 pages/compare_report.js 装配。注意：这里没有、也不该有领料入口） -->
+      <section id="page-compare" class="page" hidden>
+        <header class="page-head">
+          <h1>比对待采购</h1>
+          <div class="actions"><span class="hint">比对只读，不改动库存；导出只含「缺料」条目</span></div>
+        </header>
+        <div id="compare-report"></div>
+      </section>
+
+      <!-- 手动录入 / 编辑 / 详情（由 pages/parts_editor.js 装配） -->
+      <section id="page-parts" class="page" hidden>
+        <header class="page-head">
+          <h1>手动录入</h1>
+          <div class="actions"><span class="hint">不依赖 BOM 也能录料；与 BOM 导入写的是同一张库表</span></div>
+        </header>
+        <div id="parts-editor"></div>
+      </section>
+
+      <!-- 领料页（FR-7 的唯一入口；比对页刻意没有这个入口，见 FR-7.6） -->
+      <section id="page-stock" class="page" hidden>
+        <header class="page-head">
+          <h1>领料</h1>
+          <div class="actions"><span class="hint">出入库与按 BOM 领料都在这里；每笔都写变动记录</span></div>
+        </header>
+        <div id="stock-panel"></div>
+      </section>
+
+      <!-- 设置页（分类默认阈值 / 低库存清单 / 数据目录） -->
+      <section id="page-settings" class="page" hidden>
+        <header class="page-head">
+          <h1>设置</h1>
+          <div class="actions"><span class="hint">分类默认阈值改完后，未设个体阈值的器件立刻按新值判定</span></div>
+        </header>
+        <div id="settings-panel"></div>
+      </section>
+
+      <!-- 对账单入库页（立创物料明细对账单 .xls；只入库，不动导出与比对） -->
+      <section id="page-statement" class="page" hidden>
+        <header class="page-head">
+          <h1>按对账单入库</h1>
+          <div class="actions"><span class="hint">选立创导出的物料明细对账单（.xls）：只读 H–L 列，商品名称里的值/容差/耐压会被解出来</span></div>
+        </header>
+        <div id="statement-page"></div>
+      </section>
+
+      <!-- 备份页（整库备份 / 恢复；恢复会覆盖当前数据，需确认） -->
+  <section id="page-backup" class="page" hidden>
+        <header class="page-head">
+          <h1>备份</h1>
+          <div class="actions"><span class="hint">整库备份与恢复；恢复前会自动留一份当前状态</span></div>
+        </header>
+        <div id="backup-panel"></div>
+      </section>
+    </main>
+  </div>
+
+  <!-- 顺序要紧：模型 → 页面 → 外壳 -->
+  <script src="model/import_model.js"></script>
+  <script src="model/compare_model.js"></script>
+  <script src="model/parts_model.js"></script>
+  <script src="model/stock_model.js"></script>
+  <script src="model/settings_model.js"></script>
+  <script src="model/backup_model.js"></script>
+  <script src="pages/import_wizard.js"></script>
+  <script src="pages/compare_report.js"></script>
+  <script src="pages/parts_editor.js"></script>
+  <script src="pages/stock_page.js"></script>
+  <script src="pages/settings_page.js"></script>
+  <script src="pages/backup_page.js"></script>
+  <script src="model/statement_model.js"></script>
+  <script src="pages/statement_page.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

@@ -1,0 +1,295 @@
+/* style.css — 界面样式（原生 CSS，不引入任何框架或远程字体） */
+
+:root {
+  --bg: #f6f7f9;
+  --panel: #ffffff;
+  --line: #e2e5ea;
+  --text: #1f2329;
+  --muted: #6b7280;
+  --warn: #c2410c;
+  --warn-bg: #fff5ed;
+  --danger: #b91c1c;
+  --danger-bg: #fef2f2;
+  --accent: #1d4ed8;
+  --accent-soft: #eef2ff;
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  height: 100%;
+  background: var(--bg);
+  color: var(--text);
+  font: 14px/1.5 "Microsoft YaHei", "PingFang SC", "Segoe UI", sans-serif;
+}
+
+/* ---------------------------------------------------------------- 布局 */
+
+.layout { display: flex; height: 100vh; }
+
+.sidebar {
+  width: 190px;
+  flex: 0 0 190px;
+  background: var(--panel);
+  border-right: 1px solid var(--line);
+  display: flex;
+  flex-direction: column;
+  padding: 14px 10px;
+  gap: 14px;
+}
+
+.brand { font-size: 15px; font-weight: 600; padding: 0 6px; }
+
+.sidebar nav { display: flex; flex-direction: column; gap: 4px; }
+
+.nav {
+  text-align: left;
+  font: inherit;
+  padding: 8px 10px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text);
+  cursor: pointer;
+}
+.nav:hover { background: #f3f4f6; }
+.nav.active { background: var(--accent-soft); color: var(--accent); font-weight: 600; }
+
+.sidebar-foot { margin-top: auto; display: flex; flex-direction: column; gap: 6px; padding: 0 6px; }
+.badge {
+  display: inline-block;
+  align-self: flex-start;
+  font-size: 11px;
+  padding: 2px 8px;
+  border-radius: 10px;
+  background: #ecfdf5;
+  color: #047857;
+  border: 1px solid #a7f3d0;
+}
+
+#content { flex: 1; overflow: auto; padding: 16px 20px 24px; }
+.page { display: block; }
+/* **必须显式写这条**：`[hidden]` 的 `display:none` 来自浏览器默认样式表（UA），
+   而上面 `.page { display: block }` 是**作者样式**——作者样式优先级更高，会把 hidden 盖掉，
+   结果所有页面一直显示、堆叠在一起（用户实测反馈：打开 BOM 再打开设置，BOM 页没关）。
+   这条选择器权重更高（类 + 属性），所以能压回来。 */
+.page[hidden] { display: none; }
+
+.page-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 12px;
+}
+.page-head h1 { font-size: 18px; margin: 0; font-weight: 600; }
+.actions { display: flex; align-items: center; gap: 10px; }
+
+.status { color: var(--muted); font-size: 12px; }
+.status.error { color: var(--danger); font-weight: 600; }
+
+button {
+  font: inherit;
+  padding: 6px 14px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #fff;
+  cursor: pointer;
+}
+button:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
+button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+button.primary:hover:not(:disabled) { background: #1743c0; color: #fff; }
+button:disabled { opacity: .5; cursor: not-allowed; }
+
+input[type="search"], input[type="text"], input[type="number"], .file-box {
+  font: inherit;
+  padding: 6px 10px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #fff;
+}
+input[type="search"] { width: 300px; max-width: 40vw; }
+
+/* ------------------------------------------------------------ 库存页 */
+
+.summary {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(120px, 160px)) 1fr;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.card {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 10px 14px;
+}
+.card .label { color: var(--muted); font-size: 12px; }
+.card .value { font-size: 22px; font-weight: 600; margin-top: 2px; }
+.card .value.warn { color: var(--warn); }
+.card .value.path { font-size: 13px; font-weight: 400; word-break: break-all; color: var(--muted); }
+
+.panel {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+table { width: 100%; border-collapse: collapse; }
+
+th, td {
+  text-align: left;
+  padding: 7px 10px;
+  border-bottom: 1px solid var(--line);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 220px;
+}
+th { background: #fafbfc; color: var(--muted); font-weight: 500; font-size: 12px; }
+tbody tr:hover { background: #f9fafb; }
+td.num, th.num { text-align: right; }
+td.empty { text-align: center; color: var(--muted); padding: 28px 0; }
+
+tr.low { background: var(--warn-bg); }
+tr.low td:first-child { box-shadow: inset 3px 0 0 var(--warn); }
+td.warn { color: var(--warn); font-weight: 700; }
+
+.foot { padding: 8px 2px; color: var(--muted); font-size: 12px; }
+.warn { color: var(--warn); }
+.hint { color: var(--muted); font-size: 12px; }
+
+/* ------------------------------------------------------- 导入向导 */
+
+.wizard { display: flex; flex-direction: column; gap: 12px; }
+
+.steps { display: flex; gap: 18px; list-style: none; margin: 0; padding: 0; }
+.step { color: var(--muted); font-size: 13px; }
+.step.active { color: var(--accent); font-weight: 600; }
+
+.banner { border-radius: 8px; padding: 10px 12px; font-size: 13px; border: 1px solid var(--line); background: var(--panel); }
+.banner.error { background: var(--danger-bg); border-color: #fecaca; color: var(--danger); font-weight: 600; }
+.banner.warn { background: var(--warn-bg); border-color: #fed7aa; color: var(--warn); }
+.banner ul { margin: 6px 0 0; padding-left: 20px; }
+
+.wizard-body { display: flex; flex-direction: column; gap: 12px; }
+
+.form-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.form-row label { color: var(--muted); }
+.file-box { width: 520px; max-width: 60vw; background: #fafbfc; }
+.sets-input { width: 90px; }
+.form-actions { display: flex; gap: 10px; padding-top: 4px; }
+
+.review-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.review-title { font-weight: 600; }
+
+.table-scroll { max-height: 56vh; overflow: auto; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); }
+
+.review-table { font-size: 13px; }
+.review-table th { position: sticky; top: 0; z-index: 1; }
+/* 可改列的表头带一个小笔形标记：**一眼能看出哪些格子能改**。
+   起因（用户实际使用反馈）：以为「本次入库量」不能改 —— 因为可改格原来是透明的
+   （border: transparent + background: transparent），只有鼠标悬停才显形，
+   而旁边「应入库量」是灰底只读、数字一模一样。一个"必须人工改"的闸门
+   看起来像只读文本，就是缺陷。 */
+.review-table th.editable { color: var(--accent); }
+.review-table th.editable::after { content: " ✎"; font-size: 12px; }
+/* 可改格：**常显**边框与白底（不必悬停才知道能改）；悬停/聚焦时高亮 */
+.review-table td input {
+    width: 100%; min-width: 72px; padding: 3px 6px; font: inherit;
+    border: 1px solid var(--line); background: #fff; border-radius: 3px;
+}
+.review-table td input:hover { border-color: var(--accent); }
+.review-table td input:focus { border-color: var(--accent); box-shadow: 0 0 0 2px rgba(0, 120, 212, .15); outline: none; }
+.review-table td input.intake { width: 90px; font-weight: 600; text-align: right; }
+.review-table td input.edit-cell { width: 100%; min-width: 72px; }
+.review-table td input.edit-cell[type="number"] { width: 96px; text-align: right; font-weight: 600; }
+.review-table td.designators { max-width: 260px; }
+/* 只读格：灰底 + 弱化 + 光标禁止，与可改格形成明显差别 */
+.review-table td.formula, .review-table td.readonly-num { color: var(--muted); background: #f4f5f7; cursor: not-allowed; }
+/* 被人工改过的行：可改格左缘加一条色带，便于复核 */
+.review-table tr.mismatch-changed td input.intake { border-left: 3px solid var(--accent); }
+.review-table td.judge { white-space: normal; max-width: 200px; }
+
+tr.mismatch { background: var(--danger-bg); }
+tr.mismatch td:first-child { box-shadow: inset 3px 0 0 var(--danger); }
+tr.mismatch-changed td.formula { color: var(--accent); font-weight: 600; }
+tr.skipped { opacity: .55; text-decoration: line-through; }
+tr.skipped td.judge { text-decoration: none; }
+tr.adjudicated { background: #ecfdf5; }
+
+.adjudicate, .skip-toggle { display: inline-flex; align-items: center; gap: 4px; font-size: 12px; margin-right: 10px; }
+.mismatch-note { color: var(--danger); font-size: 11px; }
+
+.gate { display: flex; flex-direction: column; gap: 8px; }
+.gate-line { color: var(--muted); font-size: 13px; }
+
+.result { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 14px 16px; }
+.result h3 { margin: 0 0 8px; font-size: 16px; }
+.result h4 { margin: 12px 0 4px; font-size: 13px; color: var(--muted); }
+.result-list { margin: 0; padding-left: 20px; }
+.result-list .muted { color: var(--muted); }
+.result .path { color: var(--muted); font-size: 12px; word-break: break-all; margin-top: 4px; }
+
+/* ------------------------------------------------------- 比对结果页 */
+
+.tabs { display: flex; gap: 8px; }
+.tab {
+  font: inherit;
+  padding: 6px 14px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: #fff;
+  cursor: pointer;
+}
+.tab.active { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; }
+.tab:hover:not(.active) { border-color: var(--accent); color: var(--accent); }
+
+select {
+  font: inherit;
+  padding: 6px 10px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #fff;
+}
+
+/* ------------------------------------------------------- 手动录入 / 详情 */
+
+th.sortable { cursor: pointer; user-select: none; }
+th.sortable:hover { color: var(--accent); }
+th.sorted { color: var(--accent); font-weight: 600; }
+
+td.row-actions { white-space: nowrap; }
+td.row-actions button { padding: 2px 8px; font-size: 12px; margin-right: 6px; }
+
+.form-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  gap: 10px 14px;
+  margin-bottom: 10px;
+}
+
+.form-field { display: flex; flex-direction: column; gap: 2px; }
+.form-field label { color: var(--muted); font-size: 12px; }
+.form-field input, .form-field select { width: 100%; }
+.form-field .hint { font-size: 11px; }
+
+/* 领料页：器件选择器要能看清值/封装/库存 */
+.wide-select { min-width: 340px; max-width: 46vw; }
+.result h3 { margin-top: 0; }
+.result h4 { margin-top: 14px; }
+.result ul { margin: 4px 0 0; padding-left: 20px; }
+.result table { margin-top: 4px; }
+
+.detail-list {
+  display: grid;
+  grid-template-columns: 130px 1fr;
+  gap: 2px 12px;
+  margin: 0 0 12px;
+  font-size: 13px;
+}
+.detail-list dt { color: var(--muted); }
+.detail-list dd { margin: 0; word-break: break-all; }

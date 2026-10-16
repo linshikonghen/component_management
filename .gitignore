@@ -1,0 +1,67 @@
+# component_management — 元器件管理项目
+#
+# 忽略原则（三条，都有具体理由）：
+#   1. 协作中枢是**活状态**，不是源码。hub.db 每次工具调用都在变，提交它会把
+#      真实改动埋在噪音里；它自身有轮转备份（.addmodel/backups/）。
+#   2. 运行时/构建产物不入库（node_modules、__pycache__）。
+#   3. MiMo 的项目级运行时目录不是本项目产物，是外部工具生成的。
+
+# --- 协作中枢：活状态，不入库 -----------------------------------------------
+# 路径加锚点（/），避免误伤将来可能存在的同名子目录
+/.addmodel/hub.db
+/.addmodel/hub.db-wal
+/.addmodel/hub.db-shm
+/.addmodel/backups/
+/.addmodel/review-inbox/
+/.addmodel/review-prompts/
+/.addmodel/settings.json.bak-*
+
+# upload/ 是**证据与门禁脚本**的存放处，属工作产物 → **保留入库**
+# （task_submit_file 引用的证据、gate_*.py 等都在这里）
+
+# --- MiMo 的项目级运行时（外部工具生成，非本项目）----------------------------
+# 它自己的 .gitignore 也把 node_modules/package.json 排除了，与这里一致
+/.mimocode/
+
+# --- Node / Python 运行时产物 ------------------------------------------------
+node_modules/
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# --- 应用运行时数据 ----------------------------------------------------------
+# spec/plan 的目录约定里 data/ 放 parts.json 等**本地数据**，不入库
+# （数据结构由 plan §3 定义，实际数据随用户环境变化）
+/data/
+
+# --- 事故隔离区（如再发生编码损坏，临时存放，不入库）-------------------------
+/.corrupt-quarantine/
+
+# --- 回滚点（历史交给 git）---------------------------------------------------
+*.bak-*
+*.bak
+
+# --- 编辑器 / 系统 -----------------------------------------------------------
+.vscode/
+.idea/
+*.swp
+Thumbs.db
+desktop.ini
+~$*
+
+# --- 环境 / 密钥 -------------------------------------------------------------
+.env
+.env.*
+*.local
+
+# sample_statement
+# **含真实收货人姓名 / 快递单号 / 发票号**，属于个人+订单信息，**不放进 git 历史**（进了历史就删不干净）。
+# 它只是本地回归基准：测试检测到文件不在会**跳过**（tests/test_xls_biff.js 与 test_bom_parser.js 都做了）。
+# 若哪天要公开这个仓库，缺的正是这份样本——那属于有意为之。
+/tests/fixtures/sample_statement
+
+# 安装包产物（tools/make_installer.ps1 生成，可重建，不入库）
+/dist/
