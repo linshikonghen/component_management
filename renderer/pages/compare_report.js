@@ -29,6 +29,9 @@
     state = {
       step: 1, file_path: "", sets: 1, compare_id: "",
       result: null, active_group: "shortfall",
+      // 人工裁决（疑似行确认）：{ 行号: "same" | "different" } —— 只影响这份比对/导出，不写库
+      rulings: {},
+      busy: false, // 防重入：比对请求在飞时，再点确认键/开始比对不再发请求（与领料/备份页同款）
       mode: "lcsc", include_uncertain: false, output_path: "", exported: null, error: "",
     };
   }
@@ -100,6 +103,7 @@
         if (!r.file_paths || r.file_paths.length === 0) return;
         state.file_path = r.file_paths[0];
         fileBox.value = state.file_path;
+        state.rulings = {}; // 换文件 = 重新开始，旧裁决不带到新比对
       } catch (exc) {
         showError(exc.message);
       }
@@ -134,27 +138,34 @@
   }
 
   async function doCompare() {
+    if (state.busy) return; // 防重入：请求在飞时连点不再发（连点两次会让晚到的旧结果覆盖新裁决）
+    state.busy = true;
     try {
       showError("");
       if (!state.file_path) throw new Error("请先选择 BOM 文件");
       const sets = Number(state.sets);
       if (!Number.isInteger(sets) || sets < 1) throw new Error("套数必须是 ≥1 的整数");
-      const r = await call("compareRun", { file_path: state.file_path, sets });
+      // 把人工裁决一起传回服务端：**规则实现只有一份**（services/compare.applyRulings），
+      // 导出（compare:export）用的也是服务端缓存里"调整后"的结果，保证界面与导出文件一致。
+      const r = await call("compareRun", { file_path: state.file_path, sets, rulings: state.rulings });
       state.compare_id = r.compare_id;
       state.result = r;
-      state.active_group = r.stats.shortfall > 0 ? "shortfall" : (r.stats.uncertain > 0 ? "uncertain" : "enough");
+      const nonEmpty = ["shortfall", "uncertain", "enough"].filter((k) => (r[k] || []).length > 0);
+      state.active_group = nonEmpty.includes(state.active_group) ? state.active_group : (nonEmpty[0] || "enough");
       renderStep2();
     } catch (exc) {
       showError(exc.message);
+    } finally {
+      state.busy = false;
     }
   }
 
   /* ------------------------------------------------- 第 2 步：结果 */
 
   const GROUP_COLUMNS = {
-    enough: ["行", "值", "封装", "参数", "型号", "立创编号", "位号", "需求", "库存"],
-    shortfall: ["行", "值", "封装", "参数", "型号", "立创编号", "位号", "需求", "库存", "缺口"],
-    uncertain: ["行", "值", "封装", "型号", "需求", "为什么进疑似"],
+    enough: ["行", "值", "封装", "参数", "型号", "立创编号", "位号", "需求", "库存", "处置"],
+    shortfall: ["行", "值", "封装", "参数", "型号", "立创编号", "位号", "需求", "库存", "缺口", "处置"],
+    uncertain: ["行", "值", "封装", "型号", "需求", "库里候选", "为什么进疑似", "处置"],
   };
 
   function groupItems(key) {
@@ -175,6 +186,7 @@
       case "库存": return item.stock_quantity;
       case "缺口": return item.shortfall_quantity;
       case "为什么进疑似": return M.uncertainReason(item);
+      case "库里候选": return M.candidateText(item);
       default: return "";
     }
   }
@@ -202,6 +214,10 @@
         const tr = el("tr");
         if (key === "shortfall" && item.stock_quantity > 0) tr.classList.add("low");
         for (const col of columns) {
+          if (col === "处置") {
+            tr.appendChild(renderRuleCell(item, key));
+            continue;
+          }
           const td = el("td", null, cellValue(item, col, key));
           if (["需求", "库存", "缺口"].includes(col)) td.className = "readonly-num";
           if (col === "缺口") td.classList.add("warn");
@@ -213,6 +229,47 @@
     table.appendChild(tbody);
     box.appendChild(table);
     return box;
+  }
+
+  /**
+   * 「处置」格：
+   *   疑似行 → 两个**确认键**（用户反馈：说"待人工确认"却不给确认的地方）；
+   *   已确认行 → 显示确认结果 + 「改判」（撤销人工裁决）。
+   * 裁决只重算这份比对（服务端 applyRulings），不写库、不产生变动记录。
+   */
+  function renderRuleCell(item, groupKey) {
+    const td = el("td", "row-actions rule-actions");
+    if (groupKey === "uncertain") {
+      const same = el("button", null, "是同一颗（按库存算）");
+      same.type = "button";
+      same.title = `确认与库中候选 ${item.matched_part_id || ""} 是同一颗料：按候选库存算缺口（只读，不改库）`;
+      same.addEventListener("click", () => applyRuling(item.row_no, "same"));
+      const diff = el("button", null, "不是同一颗（算缺料）");
+      diff.type = "button";
+      diff.title = "确认不是同一颗料：按缺料计入采购清单（只读，不改库）";
+      diff.addEventListener("click", () => applyRuling(item.row_no, "different"));
+      td.appendChild(same);
+      td.appendChild(diff);
+      return td;
+    }
+    if (item && item.confirmed_by_human) {
+      td.appendChild(el("span", "hint",
+        item.match_reason === "confirmed_same" ? "已确认：同一颗" : "已确认：不是同一颗"));
+      const undo = el("button", null, "改判");
+      undo.type = "button";
+      undo.title = "撤销这次人工确认，回到疑似重新判断";
+      undo.addEventListener("click", () => applyRuling(item.row_no, "__reset__"));
+      td.appendChild(undo);
+    }
+    return td;
+  }
+
+  /** 记录/撤销一行的人工裁决，然后带着全部裁决重新比对（服务端统一应用） */
+  async function applyRuling(rowNo, ruling) {
+    if (state.busy) return; // 比对在飞时不受理新的确认：避免"已记裁决但界面还是旧结果"
+    if (ruling === "__reset__") delete state.rulings[rowNo];
+    else state.rulings[rowNo] = ruling;
+    await doCompare();
   }
 
   function renderStep2() {
@@ -231,6 +288,16 @@
 
     body.appendChild(el("div", "gate-line", M.summaryLine(r.stats)));
 
+    // 跨来源匹配提示（v2.11）：BOM 的封装名是 EDA 写法、库里可能是立创对账单写法，
+    // 两者靠"型号(MPN)相同"对上时要把依据写出来，否则用户会疑惑"封装名都不一样怎么算够用"。
+    const mpnMatched = ["enough", "shortfall"].reduce((sum, k) =>
+      sum + (groupItems(k) || []).filter((it) => it.match_reason === "mpn").length, 0);
+    if (mpnMatched > 0) {
+      body.appendChild(el("p", "hint",
+        `其中 ${mpnMatched} 条是「按型号匹配」：BOM 的封装名（EDA 写法）与库里的封装名写法不同，`
+        + "按型号(MPN)相同确认为同一颗料（只读比对，不会改库）。"));
+    }
+
     const msg = el("div", "banner " + (r.stats.shortfall > 0 ? "warn" : ""));
     msg.textContent = M.purchaseMessage(r.stats);
     body.appendChild(msg);
@@ -246,6 +313,13 @@
       tabs.appendChild(button);
     }
     body.appendChild(tabs);
+
+    const confirmedCount = ["enough", "shortfall"].reduce((sum, k) =>
+      sum + (groupItems(k) || []).filter((it) => it.confirmed_by_human).length, 0);
+    if (confirmedCount > 0) {
+      body.appendChild(el("p", "hint",
+        `已人工确认 ${confirmedCount} 条疑似（确认结果只影响这份比对与导出，不会写入库存库）。`));
+    }
 
     const active = M.GROUPS.find((g) => g.key === state.active_group) || M.GROUPS[0];
     body.appendChild(el("p", "hint", `${active.label}：${active.hint}`));

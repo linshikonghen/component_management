@@ -17,7 +17,7 @@
   const GROUPS = [
     { key: "enough", label: "够用", hint: "库里已有且库存充足" },
     { key: "shortfall", label: "缺料", hint: "需采购（含库存不足时的缺口）" },
-    { key: "uncertain", label: "疑似", hint: "关键信息不全或库中有相似条目，需人工确认" },
+    { key: "uncertain", label: "疑似", hint: "关键信息不全或库中有相似条目，需人工确认（行尾点「是同一颗 / 不是同一颗」）" },
   ];
 
   /** 导出模式（spec §4.2 两种，键名与 compare:export 的 mode 一致） */
@@ -129,12 +129,39 @@
     return `需求 ${toInt(it.required_quantity)} · 库存 ${toInt(it.stock_quantity)} · 缺口 ${toInt(it[PURCHASE_FIELD])}`;
   }
 
-  /** 疑似条目为什么进疑似（missing_fields 为空则是"库中有相似条目"） */
+  /** 疑似条目为什么进疑似（missing_fields 为空则是"库中有相似条目"）；
+   *  有候选快照时把"候选那边是什么"也写出来（用户反馈：只说"待人工确认"没说清疑似的是什么）。 */
   function uncertainReason(item) {
-    const missing = (item && item.missing_fields) || [];
-    if (missing.length === 0) return "库中有相似条目，但无法确认是同一种料";
+    const it = item || {};
+    const missing = it.missing_fields || [];
     const labels = { voltage: "耐压", dielectric: "材质", tolerance: "容差", value: "值", footprint: "封装" };
-    return `BOM 缺 ${missing.map((f) => labels[f] || f).join("、")}，无法精确判定`;
+    if (missing.length === 0) return "库中有相似条目，但无法确认是同一种料";
+    const missingText = missing.map((f) => labels[f] || f).join("、");
+    const candOf = {
+      value: it.candidate_value, footprint: it.candidate_footprint,
+      voltage: it.candidate_voltage, dielectric: it.candidate_dielectric,
+      tolerance: it.candidate_tolerance,
+    };
+    const details = [];
+    for (const f of missing) {
+      const v = String(candOf[f] == null ? "" : candOf[f]).trim();
+      if (v !== "") details.push(`${labels[f] || f}「${v}」`);
+    }
+    return details.length > 0
+      ? `BOM 缺 ${missingText}（库里候选：${details.join("、")}），无法精确判定`
+      : `BOM 缺 ${missingText}，无法精确判定`;
+  }
+
+  /** 库里候选器件的一句话身份：疑似行要明确"疑似的是哪条候选"（值/封装/耐压/容差/型号/库存） */
+  function candidateText(item) {
+    const it = item || {};
+    const bits = [it.candidate_value, it.candidate_footprint, it.candidate_voltage, it.candidate_tolerance]
+      .map((v) => String(v == null ? "" : v).trim())
+      .filter((v) => v !== "");
+    const mpn = String(it.candidate_part_number == null ? "" : it.candidate_part_number).trim();
+    const stock = toInt(it.stock_quantity);
+    const tail = [mpn, `库存 ${stock}`].filter((v) => v !== "").join("，");
+    return (bits.length > 0 ? bits.join(" / ") : "（候选器件字段为空）") + `（${tail || "库存 0"}）`;
   }
 
   const api = {
@@ -153,6 +180,7 @@
     defaultFileName,
     quantityLine,
     uncertainReason,
+    candidateText,
   };
 
   if (typeof module !== "undefined" && module.exports) module.exports = api;

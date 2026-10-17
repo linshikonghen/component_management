@@ -204,6 +204,38 @@ t("compare:run 空库 → 33 条全缺料", async () => {
   assert.strictEqual(r.stats.no_stock, 33);
 });
 
+t("compare:run 支持人工裁决 rulings：同一颗→够用、不是→缺料；只影响本次结果，库文件不变", async () => {
+  const { handlers, db } = freshEnv();
+  // 造"疑似"：BOM 行 10uF/C1210 缺 耐压/材质/容差，库里有一条 10uF/1210/±10% 的候选
+  await handlers["parts:save"]({ part: { value: "10uF", footprint: "1210", tolerance: "±10%", quantity: 999 } });
+  const before = fs.readFileSync(db.paths().parts);
+
+  const base = await handlers["compare:run"]({ file_path: BOM_PATH, sets: 1 });
+  assert.ok(base.stats.uncertain >= 1, "应有疑似行");
+  const rowNo = base.uncertain[0].row_no;
+  assert.ok(base.uncertain[0].candidate_value !== undefined, "疑似行要带候选快照");
+
+  const same = await handlers["compare:run"]({ file_path: BOM_PATH, sets: 1, rulings: { [rowNo]: "same" } });
+  assert.strictEqual(same.stats.uncertain, base.stats.uncertain - 1, "确认同一颗后疑似减一");
+  const sameRow = same.enough.concat(same.shortfall).find((x) => x.row_no === rowNo);
+  assert.ok(sameRow, "确认同一颗后该行应进入够用/缺料");
+  assert.strictEqual(sameRow.match_reason, "confirmed_same");
+
+  const diff = await handlers["compare:run"]({ file_path: BOM_PATH, sets: 1, rulings: { [rowNo]: "different" } });
+  const diffRow = diff.shortfall.find((x) => x.row_no === rowNo);
+  assert.ok(diffRow, "确认不是同一颗后该行应进缺料");
+  assert.strictEqual(diffRow.match_reason, "confirmed_different");
+  assert.strictEqual(diffRow.shortfall_quantity, diffRow.required_quantity);
+
+  // 导出用的是"服务端缓存里调整后的结果"：裁决后的结果再导出，条数应与 shortfall(+疑似) 对应
+  const outPath = path.join(db.paths().parts, "..", "ruled.xlsx");
+  const exported = await handlers["compare:export"]({ compare_id: diff.compare_id, output_path: outPath, mode: "lcsc" });
+  assert.strictEqual(exported.ok, true, exported.error);
+  assert.strictEqual(exported.exported_count, diff.shortfall.length);
+
+  assert.ok(before.equals(fs.readFileSync(db.paths().parts)), "裁决只是比对视图，不得改动库文件");
+});
+
 t("compare:export：导出缺料清单为 xlsx，文件真存在且能被读回", async () => {
   const { handlers, base } = await envWithLibrary();
   const run = await handlers["compare:run"]({ file_path: BOM_PATH, sets: 1 });

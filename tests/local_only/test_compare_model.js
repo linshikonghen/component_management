@@ -281,6 +281,26 @@ t("**比对与导出全程只读**：库里文件字节不变（FR-2.5 在界面
   assert.ok(movesBefore.equals(fs.readFileSync(db.paths().movements)), "movements.json 必须字节级不变");
 });
 
+t("疑似行要标清\"疑似的是什么\"：库里候选一句话身份 + 原因写明候选那边的值", () => {
+  assert.strictEqual(
+    model.candidateText({
+      candidate_value: "10uF", candidate_footprint: "1210", candidate_voltage: "",
+      candidate_tolerance: "±10%", candidate_part_number: "M1", stock_quantity: 999,
+    }),
+    "10uF / 1210 / ±10%（M1，库存 999）",
+  );
+  // 没有候选值时不报空：给兜底文案
+  assert.ok(/候选器件字段为空/.test(model.candidateText({ stock_quantity: 0 })));
+
+  // 原有"缺什么字段"文案保持不变（已有测试的兼容）
+  assert.strictEqual(model.uncertainReason({ missing_fields: ["tolerance"] }), "BOM 缺 容差，无法精确判定");
+  // 有候选快照时补上"库里候选那边是什么"
+  assert.strictEqual(
+    model.uncertainReason({ missing_fields: ["tolerance"], candidate_tolerance: "±10%" }),
+    "BOM 缺 容差（库里候选：容差「±10%」），无法精确判定",
+  );
+});
+
 /* ------------------------------------------------------------------ 执行 */
 
 runQueue().then(() => {

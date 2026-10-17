@@ -163,3 +163,22 @@ src/main.js ──→ src/ipc/{channels,handlers} + src/services/store.js（仅�
   安全检查清单 <https://www.electronjs.org/docs/latest/tutorial/security>
 - Electron 安全注意事项（第三方整理）<https://quasar.dev/quasar-cli-vite/developing-electron-apps/electron-security-concerns>
 - 搜索/筛选/分面（faceted search）的测试模式参考 <https://docs.testchimp.io/guides/patterns/testing-search-filters/>
+
+## 10. 工作区整洁与取证约定（2026-10-17 清理后）
+
+应用代码之外，工作区里还有**协作状态**与**取证产物**。它们不是产品代码，但同样要能追溯；
+约定如下（一次性补丁/探针脚本不入库、用完即删，见 `.gitignore`）：
+
+| 位置 | 作用 | 约定 |
+|---|---|---|
+| `.addmodel/hub.db` | 协作中枢（SQLite：任务/评审/事件/锁） | **不入库**（活状态）。早期任务把整份仓库 diff 内联进 `reviews.diff`；2026-10-17 清理：26 条 >50KB 的 diff 逐字节外置到 `_archive/review-diffs-20261017.tar.gz`，DB 里留指针 + sha256（41.7MB → 5.0MB），任务/评审/事件条数不变 |
+| `.addmodel/backups/` | hub 自动轮转备份 | 只留**最近 1 份**（清理前 5 份共 47.9MB → 1 份约 4.8MB） |
+| `.addmodel/upload/` | 取证与门禁输出（提交/评审引用的 txt/md/diff/截图） | **保留**，按任务号追溯；一次性 `_*.py` / `_*.js` 脚本**用完即删**；长内容走文件、不入库脚本 |
+| `.addmodel/upload/_archive/` | 历史取证归档（gitignore） | 旧任务证据、评审 diff 压缩包、历史交接单；新证据先写 `upload/` 根，不要直接写这里 |
+| `.addmodel/upload/saved/` | 需要跨会话交接的脚本/补丁 | 只存"还要再用"的；执行完移入 `_archive/` 并在工作单注明 |
+| `data/` | 用户真实数据 | 不入库；删除/合并器件必须用户确认后走正式通道（留变动记录） |
+| `backups/`、`dist/`、`.mimocode/` | 本机运行/发布产物、外部工具目录 | 均不入库，可重建 |
+
+**清理原则**：删前先归档（能压缩的压缩），**删摘要不删事实**——每次清理都要能回答
+"原来是什么、现在在哪里"。追溯入口：`_archive/` 下的 INDEX 与本表。
+

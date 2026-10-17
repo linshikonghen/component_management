@@ -243,6 +243,10 @@ tr.decided-merge td:first-child, tr.decided-new td:first-child { box-shadow: ins
    （border: transparent + background: transparent），只有鼠标悬停才显形，
    而旁边「应入库量」是灰底只读、数字一模一样。一个"必须人工改"的闸门
    看起来像只读文本，就是缺陷。 */
+/* 比对页「处置」列：疑似行给确认键（完整句子按钮），允许换行不被截断 */
+.review-table td.rule-actions { white-space: normal; max-width: none; }
+.review-table td.rule-actions button { display: block; margin: 2px 0; text-align: left; }
+
 .review-table th.editable { color: var(--accent); }
 .review-table th.editable::after { content: " ✎"; font-size: 12px; }
 /* 可改格：**常显**边框与白底（不必悬停才知道能改）；悬停/聚焦时高亮 */

@@ -287,13 +287,17 @@ function createHandlers(deps = {}) {
         if (!parsed.ok) return Object.assign({ ok: false, error: parsed.error }, empty);
         const result = compareSvc.compareBom(parsed.items, db.loadParts(), sets);
         if (!result.ok) return Object.assign({ ok: false, error: result.error }, empty);
+        // 人工裁决（比对页的「是同一颗/不是同一颗」按钮）：**只调整这份结果的分组与导出内容**，
+        // 不写库、不产生变动记录（FR-2.5/2.6 仍然成立）。
+        const adjusted = compareSvc.applyRulings(result, r.rulings == null ? null : r.rulings);
+        if (!adjusted.ok) return Object.assign({ ok: false, error: adjusted.error }, empty);
         // 同一秒内重复比对也要拿到不同的 compare_id（否则 compare:export 可能导出另一次的结果）
         const compare_id = nextRunId("compare", clock(), issuedRunIds);
         // 缓存当次结果供 compare:export 使用（**只缓存，不落盘**：比对永远只读）
-        rememberCompare({ compare_id, file_path: r.file_path, sets, result });
+        rememberCompare({ compare_id, file_path: r.file_path, sets, result: adjusted });
         return ok({
-          compare_id, enough: result.enough, shortfall: result.shortfall,
-          uncertain: result.uncertain, stats: result.stats,
+          compare_id, enough: adjusted.enough, shortfall: adjusted.shortfall,
+          uncertain: adjusted.uncertain, stats: adjusted.stats,
         });
       } catch (exc) {
         return fail(exc);

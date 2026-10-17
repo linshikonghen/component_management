@@ -23,7 +23,7 @@
  * 本模块决定"发生了什么"，store 决定"身份与时间"。
  */
 
-const { dedupeKey } = require("./compare");
+const { dedupeKey, buildLibraryIndex, findLibraryMatch } = require("./compare");
 const { nowIso } = require("./store");
 const ids = require("./ids");
 const { toInt, clone, str, isBlank } = require("./value_util");
@@ -360,11 +360,10 @@ function pickByBom(items, sets, parts, options = {}) {
   const allowPartial = options.allow_partial === true;
   const reason = str(options.reason);
   const library = (Array.isArray(parts) ? parts : []).map(clone);
-  const index = new Map();
-  library.forEach((part, i) => {
-    const key = dedupeKey(part);
-    if (!index.has(key)) index.set(key, i);
-  });
+  // **与比对共用同一套"怎么算同一颗料"**（compare.buildLibraryIndex / findLibraryMatch）：
+  // 判定键归一（封装 EDA↔立创写法）+ 型号兜底。否则会出现同一份 BOM：
+  // 比对页说"够用"，按 BOM 领料却说"库里没有"——两个入口结论互相矛盾（实测跨来源数据就会这样）。
+  const index = buildLibraryIndex(library);
 
   const unknown = [];
   const insufficient = [];
@@ -376,8 +375,8 @@ function pickByBom(items, sets, parts, options = {}) {
     const item = raw || {};
     const required = toInt(item.quantity_per_board) * setCount;
     if (required <= 0) continue; // 需求 0：无可领
-    const at = index.get(dedupeKey(item));
-    if (at == null) {
+    const found = findLibraryMatch(index, item);
+    if (!found) {
       unknown.push({
         row_no: item.row_no,
         part_number: str(item.manufacturer_part),
@@ -387,7 +386,8 @@ function pickByBom(items, sets, parts, options = {}) {
       });
       continue;
     }
-    const part = library[at];
+    // entry.first 就是 library 里的那条器件对象（clone 后的），后续按它扣减/留痕
+    const part = found.entry.first;
     // **同一判定键的多行必须累计着算**：一份 BOM 里两行同规格（不同位号/不同厂）完全合法，
     // 两行会指向同一个器件。若每行都拿"原始库存"去比，就会出现
     // 「各 10 个、库存 15 → 两行都判定为够，实际扣成 −5」——库存变负数，

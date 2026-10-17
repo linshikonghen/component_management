@@ -965,6 +965,165 @@ t("比对页（pages/compare_report.js）：选文件→比对→三组计数与
   console.log(`        （三组 tab：${tabs.map((b) => b.textContent).join(" / ")}）`);
 });
 
+t("比对页：跨来源「按型号匹配」的行要在页面上说明依据（用户实测 bug 的可读性）", async () => {
+  const env = freshEnv(MAIN_BOM);
+  // 行1：BOM 值 10uF/封装 C1210/型号 1210B106K500NT；库存按对账单口径存（封装写法不同，靠型号对）
+  await env.handlers["parts:save"]({ part: { value: "10uF", footprint: "CAP-SMD", part_number: "1210B106K500NT", quantity: 999 } });
+
+  const { sandbox, doc } = createPageSandbox(env.handlers);
+  runScript(sandbox, "renderer/pages/compare_report.js");
+  const host = doc.createElement("div");
+  host.id = "compare-report-mpn";
+  doc.body.appendChild(host);
+  sandbox.ComparePage.mount(host);
+  await tick();
+
+  doc.querySelectorAll("#compare-body button")[0].click();
+  await tick();
+  doc.getElementById("compare-start").click();
+  await tick();
+  await tick();
+
+  const body = doc.getElementById("compare-body").textContent;
+  assert.ok(/按型号匹配/.test(body), "页面要说明「按型号匹配」的依据，实际：" + body.slice(0, 240));
+  assert.ok(/确认为同一颗料/.test(body), "还要说明这是只读确认、不改库");
+});
+
+t("比对页：疑似行有**确认键**且标清库里候选；「是同一颗」→够用、「不是」→缺料、可改判", async () => {
+  const env = freshEnv(MAIN_BOM);
+  // 造疑似：BOM 行 10uF/C1210 缺 耐压/材质/容差；库里有 10uF/1210/±10% 的候选
+  await env.handlers["parts:save"]({ part: { value: "10uF", footprint: "1210", tolerance: "±10%", quantity: 999 } });
+
+  const { sandbox, doc } = createPageSandbox(env.handlers);
+  runScript(sandbox, "renderer/pages/compare_report.js");
+  const host = doc.createElement("div");
+  host.id = "compare-report-rulings";
+  doc.body.appendChild(host);
+  sandbox.ComparePage.mount(host);
+  await tick();
+
+  doc.querySelectorAll("#compare-body button")[0].click();
+  await tick();
+  doc.getElementById("compare-start").click();
+  await tick();
+  await tick();
+
+  const box = () => doc.getElementById("compare-body");
+  buttonByText(box(), "疑似").click();
+  await tick();
+  const suspected = box().textContent;
+  assert.ok(/库里候选/.test(suspected), "要标清疑似的是什么（库里候选列）");
+  assert.ok(/是同一颗（按库存算）/.test(suspected), "疑似行必须给确认键");
+  assert.ok(/不是同一颗（算缺料）/.test(suspected), "另一个确认键");
+
+  // ① 确认「同一颗」→ 够用，且页面显示已确认
+  buttonByText(box(), "是同一颗（按库存算）").click();
+  await tick();
+  await tick();
+  assert.ok(/已人工确认 1 条疑似/.test(box().textContent), "页面要说明已人工确认的条数");
+  buttonByText(box(), "够用").click();
+  await tick();
+  const enoughText = box().textContent;
+  assert.ok(/已确认：同一颗/.test(enoughText), "够用组里要标出人工确认结果");
+
+  // ② 改判 → 回到疑似（有确认键）
+  buttonByText(box(), "改判").click();
+  await tick();
+  await tick();
+  buttonByText(box(), "疑似").click();
+  await tick();
+  assert.ok(/是同一颗（按库存算）/.test(box().textContent), "改判后应回到疑似并可重新选择");
+
+  // ③ 确认「不是同一颗」→ 缺料，且标出确认结果
+  buttonByText(box(), "不是同一颗（算缺料）").click();
+  await tick();
+  await tick();
+  buttonByText(box(), "缺料").click();
+  await tick();
+  assert.ok(/已确认：不是同一颗/.test(box().textContent), "缺料组里要标出人工确认结果");
+});
+
+t("比对页：没选文件就点「开始比对」→ 页面显示错误（不静默、不白屏）", async () => {
+  const env = freshEnv(MAIN_BOM);
+  const { sandbox, doc } = createPageSandbox(env.handlers);
+  runScript(sandbox, "renderer/pages/compare_report.js");
+  const host = doc.createElement("div");
+  host.id = "compare-nofile";
+  doc.body.appendChild(host);
+  sandbox.ComparePage.mount(host);
+  await tick();
+
+  doc.getElementById("compare-start").click();
+  await tick();
+  const err = doc.getElementById("compare-error");
+  assert.ok(err && !err.hidden, "错误条要显示出来");
+  assert.ok(/请先选择 BOM 文件/.test(err.textContent), "要说清缺什么，实际：" + (err && err.textContent));
+});
+
+t("比对页防重入：连点三次「开始比对」只发一次请求（并发/重复调用）", async () => {
+  const env = freshEnv(MAIN_BOM);
+  const { sandbox, doc } = createPageSandbox(env.handlers);
+  runScript(sandbox, "renderer/pages/compare_report.js");
+  const host = doc.createElement("div");
+  host.id = "compare-busy";
+  doc.body.appendChild(host);
+  sandbox.ComparePage.mount(host);
+  await tick();
+
+  doc.querySelectorAll("#compare-body button")[0].click(); // 选择文件
+  await tick();
+
+  let calls = 0;
+  const orig = sandbox.api.compareRun;
+  sandbox.api.compareRun = async (payload) => { calls += 1; return orig(payload); };
+  const start = doc.getElementById("compare-start");
+  start.click();
+  start.click();
+  start.click();
+  await tick();
+  await tick();
+
+  assert.strictEqual(calls, 1, `连点 3 次应只发 1 次 compareRun，实际 ${calls}`);
+  assert.ok(/共 33 条/.test(doc.getElementById("compare-body").textContent), "第一次比对仍要正常出结果");
+});
+
+t("比对页：确认时后端报错 → 错误显示出来（裁决仍可重试）", async () => {
+  const env = freshEnv(MAIN_BOM);
+  await env.handlers["parts:save"]({ part: { value: "10uF", footprint: "1210", tolerance: "±10%", quantity: 999 } });
+  const { sandbox, doc } = createPageSandbox(env.handlers);
+  runScript(sandbox, "renderer/pages/compare_report.js");
+  const host = doc.createElement("div");
+  host.id = "compare-ruling-error";
+  doc.body.appendChild(host);
+  sandbox.ComparePage.mount(host);
+  await tick();
+
+  doc.querySelectorAll("#compare-body button")[0].click();
+  await tick();
+  doc.getElementById("compare-start").click();
+  await tick();
+  await tick();
+
+  const box = () => doc.getElementById("compare-body");
+  buttonByText(box(), "疑似").click();
+  await tick();
+  const orig = sandbox.api.compareRun;
+  sandbox.api.compareRun = async () => ({ ok: false, error: "模拟：比对服务暂时不可用" });
+  buttonByText(box(), "是同一颗（按库存算）").click();
+  await tick();
+  await tick();
+
+  const err = doc.getElementById("compare-error");
+  assert.ok(err && !err.hidden, "后端报错必须显示出来");
+  assert.ok(/模拟：比对服务暂时不可用/.test(err.textContent), "错误原文要可见，实际：" + (err && err.textContent));
+  // 恢复后端后再点一次：裁决仍生效（错一次不把界面弄坏）
+  sandbox.api.compareRun = orig;
+  buttonByText(box(), "是同一颗（按库存算）").click();
+  await tick();
+  await tick();
+  assert.ok(/已人工确认 1 条疑似/.test(box().textContent), "重试后裁决应生效");
+});
+
 t("领料页（pages/stock_page.js）：手选出库 → 库真的减，且最近变动里出现该条", async () => {
   const env = freshEnv(MAIN_BOM);
   const saved = await env.handlers["parts:save"]({ part: { value: "22uF", footprint: "C1206", quantity: 20 } });

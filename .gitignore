@@ -18,6 +18,10 @@
 
 # upload/ 是**证据与门禁脚本**的存放处，属工作产物 → **保留入库**
 # （task_submit_file 引用的证据、gate_*.py 等都在这里）
+# 但**一次性补丁/探针脚本**（_patch_*.py、_probe_*.js 这类）用完即弃：证据引用写进 txt/md 即可，
+# 脚本本身不入库（2026-10-17 清理：107 个此类脚本已删除，此后由本规则挡住）
+/.addmodel/upload/_*.py
+/.addmodel/upload/_*.js
 
 # --- MiMo 的项目级运行时（外部工具生成，非本项目）----------------------------
 # 它自己的 .gitignore 也把 node_modules/package.json 排除了，与这里一致

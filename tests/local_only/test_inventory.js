@@ -390,6 +390,25 @@ t("库中没有的条目 → 列入 unknown，明确列出而不静默跳过（A
   assert.strictEqual(r.picked.length, 1, "库中有的条目照常领");
 });
 
+t("**跨来源** BOM 也能按 BOM 领料：EDA 封装名 + 型号相同 → 匹配到库里的立创封装器件（v2.11 回归）", () => {
+  // 修复前：比对按型号能找到、按 BOM 领料却报"库中没有"，两个入口结论互相矛盾
+  const parts = [{
+    id: "p_hdr", value: "PM254V-11-03-H85", footprint: "插件,P=2.54mm",
+    part_number: "PM254V-11-03-H85", quantity: 5, category: "排母", mpn_list: [],
+  }];
+  const items = [bomItem({
+    row_no: 1, value: "", footprint: "HDR-TH_3P-P2.54-V-F",
+    manufacturer_part: "PM254V-11-03-H85", quantity_per_board: 2, total_quantity: 2,
+    voltage: "", dielectric: "", tolerance: "",
+  })];
+  const r = inv.pickByBom(items, 1, parts, { pick_id: "pick_cross", reason: "跨来源领料" });
+  assert.strictEqual(r.ok, true, r.error);
+  assert.strictEqual(r.unknown.length, 0, "不应再报「库中没有」");
+  assert.strictEqual(r.picked.length, 1);
+  assert.strictEqual(r.picked[0].deducted, 2);
+  assert.strictEqual(r.parts[0].quantity, 3);
+});
+
 t("AC-7：同一次领料的每条扣减**带同一批次 ref**", () => {
   const parts = inv.commitBom(BATCH, [
     bomItem({ row_no: 1, total_quantity: 10, intake_quantity: 10 }),

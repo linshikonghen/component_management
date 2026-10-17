@@ -424,6 +424,199 @@ t("真实主样本 + 把样本本身当库存（数量充足）→ 全部够用�
   assert.strictEqual(dupKeys[0], 2, "该键应出现 2 行");
 });
 
+/* ============================ §7 跨来源匹配（v2.11 修「比对全缺料」） */
+
+section("§7 跨来源匹配：EDA 封装名 vs 立创封装名（用户 2026-10-17 实测 bug）");
+
+t("封装归一：EDA 写法与立创写法在判定键里等价（R0603↔0603、SOT-23_L…↔SOT-23、TQFN-16_L…↔TQFN-16-EP(3x3)）", () => {
+  const sameKey = (a, b) => assert.strictEqual(cmp.dedupeKey(a), cmp.dedupeKey(b), JSON.stringify([a, b]));
+  sameKey(
+    { value: "10kΩ", footprint: "R0603" },
+    { value: "10K", footprint: "0603" },
+  );
+  sameKey(
+    { value: "100nF", footprint: "C0603" },
+    { value: "0.1uF", footprint: "0603" },
+  );
+  sameKey(
+    { value: "", footprint: "SOT-23_L2.9-W1.3-P1.90-LS2.4-BR", manufacturer_part: "AO3401A" },
+    { value: "AO3401A", footprint: "SOT-23" },
+  );
+  sameKey(
+    { value: "", footprint: "TQFN-16_L3.0-W3.0-P0.50-BL-EP1.1", manufacturer_part: "MAX98357AETE+T" },
+    { value: "MAX98357AETE+T", footprint: "TQFN-16-EP(3x3)" },
+  );
+  sameKey(
+    { value: "", footprint: "F1812", manufacturer_part: "1812L300/24SLER" },
+    { value: "1812L300/24SLER", footprint: "1812" },
+  );
+  // 真不同的封装不能被归一成同一个（不能为了匹配而乱配）
+  assert.notStrictEqual(
+    cmp.dedupeKey({ value: "10uF", footprint: "C1206" }),
+    cmp.dedupeKey({ value: "10uF", footprint: "C0805" }),
+  );
+});
+
+t("值为空 → 按 v2.5「值=型号」参与判定：BOM 里 MOS/连接器值为空也能对上库里「值=型号」的同一颗料", () => {
+  const a = cmp.dedupeKey({ value: "", footprint: "SOT-23", manufacturer_part: "AO3401A" });
+  const b = cmp.dedupeKey({ value: "AO3401A", footprint: "SOT-23", part_number: "AO3401A" });
+  assert.strictEqual(a, b);
+});
+
+t("容差归一：±1% / +/-1% / 1% 在判定键里相同", () => {
+  const base = { value: "1kΩ", footprint: "R0603" };
+  assert.strictEqual(
+    cmp.dedupeKey(Object.assign({}, base, { tolerance: "±1%" })),
+    cmp.dedupeKey(Object.assign({}, base, { tolerance: "+/-1%" })),
+  );
+  assert.strictEqual(
+    cmp.dedupeKey(Object.assign({}, base, { tolerance: "±1%" })),
+    cmp.dedupeKey(Object.assign({}, base, { tolerance: "1%" })),
+  );
+});
+
+t("比对：判定键对不上、但型号相同 → 按型号匹配（match_reason=mpn），库存够就是够用", () => {
+  const items = [bomItem({
+    row_no: 1, value: "", footprint: "HDR-TH_3P-P2.54-V-F",
+    manufacturer_part: "PM254V-11-03-H85", quantity_per_board: 2,
+    voltage: "", dielectric: "", tolerance: "",
+  })];
+  const parts = [part({
+    id: "p_hdr", value: "PM254V-11-03-H85", footprint: "插件,P=2.54mm",
+    part_number: "PM254V-11-03-H85", quantity: 10,
+  })];
+  const r = cmp.compareBom(items, parts, 1);
+  assert.strictEqual(r.enough.length, 1, "应进够用（按型号匹配到库里的同型号器件）");
+  assert.strictEqual(r.enough[0].match_reason, "mpn");
+  assert.strictEqual(r.enough[0].matched_part_id, "p_hdr");
+  assert.strictEqual(r.enough[0].stock_quantity, 10);
+});
+
+t("型号兜底也守缺口语义：需求 24 / 库存 10 → 缺料 14（不是 24）", () => {
+  const items = [bomItem({
+    row_no: 1, quantity_per_board: 24, value: "", footprint: "SW-TH_3P-L8.8-W3.9-P2.50_SS12D00G3",
+    manufacturer_part: "SS-12D00-G3", voltage: "", dielectric: "", tolerance: "",
+  })];
+  const parts = [part({
+    id: "p_sw", value: "SS-12D00-G3", footprint: "插件-3P,8.8x3.9mm",
+    part_number: "SS-12D00-G3", quantity: 10,
+  })];
+  const r = cmp.compareBom(items, parts, 1);
+  assert.strictEqual(r.shortfall.length, 1);
+  assert.strictEqual(r.shortfall[0].match_reason, "mpn");
+  assert.strictEqual(r.shortfall[0].shortfall_quantity, 14, "缺口 = 需求 24 − 库存 10");
+  assert.strictEqual(r.stats.insufficient, 1);
+});
+
+t("**安全阀**：型号相同但两边显式值冲突 → 不按型号硬配（33pF 不能认成 10uF 的库存）", () => {
+  const items = [bomItem({
+    row_no: 1, value: "33pF", footprint: "C0603", manufacturer_part: "1210B106K500NT",
+    voltage: "", dielectric: "", tolerance: "",
+  })];
+  const parts = [part({
+    id: "p_bad", value: "10uF", footprint: "1210",
+    part_number: "1210B106K500NT", quantity: 100,
+  })];
+  const r = cmp.compareBom(items, parts, 1);
+  assert.strictEqual(r.enough.length, 0, "不能因为型号相同就把 33pF 认成 10uF");
+  assert.strictEqual(r.shortfall.length + r.uncertain.length, 1, "应归入缺料/疑似，交人工");
+});
+
+t("**真实主样本 ×「对账单口径」库存**：库里按 值+立创封装+型号 建（不是同一份 BOM 录的）→ 不再全军覆没", () => {
+  // 复现用户场景：库是「对账单入库」的（封装为立创写法、连接器等以值=型号），
+  // BOM 是 EDA 导出的（封装是 EDA 写法）。修复前 33 行全部误判缺料。
+  const parsed = bp.parseBomFile(path.join(FIX, MAIN_BOM), 1);
+  const isChip = (fp) => /^[RCLDF]\d{3,4}$/i.test(String(fp || ""));
+  const library = parsed.items.map((it, i) => ({
+    id: "p_" + String(i + 1).padStart(4, "0"),
+    // 对账单口径：无参数值的料「值=型号」；有值的料值就是参数值
+    value: it.value || it.manufacturer_part,
+    // 对账单口径封装：贴片被动件是纯尺寸；其余用立创式描述（与 EDA 写法不同）
+    footprint: isChip(it.footprint) ? String(it.footprint).slice(1) : "SMD,插件封装",
+    part_number: it.manufacturer_part,
+    quantity: 100,
+  }));
+  const r = cmp.compareBom(parsed.items, library, 1);
+  assert.strictEqual(r.stats.shortfall, 0, "库存充足且型号都能对上时不应有缺料（修复前 33 条全缺）");
+  assert.strictEqual(r.stats.uncertain, 0, "不应有疑似（型号能确认）");
+  assert.strictEqual(r.stats.enough, parsed.items.length);
+  const mpnCount = r.enough.filter((x) => x.match_reason === "mpn").length;
+  console.log(`        （33 行中按判定键 ${r.enough.length - mpnCount} 条、按型号 ${mpnCount} 条）`);
+});
+
+/* ============================ §8 人工裁决（比对页确认键的规则） */
+
+section("§8 人工裁决 applyRulings（疑似行的「是同一颗 / 不是同一颗」）");
+
+function uncertainResult() {
+  return {
+    ok: true, compare_id: "compare_test", enough: [], shortfall: [],
+    uncertain: [
+      { row_no: 1, required_quantity: 5, stock_quantity: 10, shortfall_quantity: 0, matched_part_id: "p_a", missing_fields: ["tolerance"] },
+      { row_no: 2, required_quantity: 8, stock_quantity: 3, shortfall_quantity: 0, matched_part_id: "p_b", missing_fields: ["voltage"] },
+      { row_no: 3, required_quantity: 2, stock_quantity: 0, shortfall_quantity: 0, matched_part_id: "", missing_fields: ["value"] },
+    ],
+    stats: { total: 3, enough: 0, shortfall: 0, uncertain: 3, no_stock: 0, insufficient: 0 },
+  };
+}
+
+t("确认「同一颗」→ 按候选库存算：够的进够用、不够的按 max(0,需求−库存) 进缺料", () => {
+  const r = cmp.applyRulings(uncertainResult(), { 1: "same", 2: "same" });
+  assert.strictEqual(r.ok, true, r.error);
+  assert.strictEqual(r.uncertain.length, 1, "只剩未裁决的第 3 行");
+  assert.deepStrictEqual(r.enough.map((x) => x.row_no), [1]);
+  assert.strictEqual(r.enough[0].match_reason, "confirmed_same");
+  assert.strictEqual(r.enough[0].confirmed_by_human, true);
+  assert.deepStrictEqual(r.shortfall.map((x) => x.row_no), [2]);
+  assert.strictEqual(r.shortfall[0].shortfall_quantity, 5, "需求 8 − 库存 3 = 缺口 5");
+});
+
+t("确认「不是同一颗」→ 从疑似移入缺料：库存 0、缺口 = 需求", () => {
+  const r = cmp.applyRulings(uncertainResult(), { 3: "different" });
+  assert.strictEqual(r.shortfall.length, 1);
+  assert.strictEqual(r.shortfall[0].row_no, 3);
+  assert.strictEqual(r.shortfall[0].match_reason, "confirmed_different");
+  assert.strictEqual(r.shortfall[0].stock_quantity, 0);
+  assert.strictEqual(r.shortfall[0].shortfall_quantity, 2);
+  assert.strictEqual(r.uncertain.length, 2, "未裁决的两条仍在疑似");
+});
+
+t("统计随裁决重算；rulings 为空/非法值 → 全部回到未裁决；非对象 → 明确报错", () => {
+  const all = cmp.applyRulings(uncertainResult(), { 1: "same", 2: "different", 3: "same" });
+  assert.deepStrictEqual(
+    [all.stats.total, all.stats.enough, all.stats.shortfall, all.stats.uncertain],
+    [3, 1, 2, 0],
+  );
+  const reset = cmp.applyRulings(uncertainResult(), { 1: "maybe", 2: null });
+  assert.strictEqual(reset.stats.uncertain, 3, "非法裁决值不生效，仍留疑似");
+  const bad = cmp.applyRulings(uncertainResult(), [1, 2]);
+  assert.strictEqual(bad.ok, false);
+  assert.ok(/rulings 必须是对象/.test(bad.error));
+});
+
+t("比对输出的疑似行带**候选器件身份快照**（界面要标清疑似的是哪条候选）", () => {
+  // BOM 侧没有型号（常见：BOM 只写值/封装），所以不会走"型号相同"的精确匹配；
+  // 缺 耐压/材质/容差 → 有候选才进疑似，候选身份要原样带出来。
+  const items = [bomItem({
+    row_no: 1, value: "10uF", footprint: "C1210", voltage: "", dielectric: "", tolerance: "",
+    manufacturer_part: "",
+  })];
+  const parts = [part({
+    id: "p_cand", value: "10uF", footprint: "1210", voltage: "50V", dielectric: "X7R",
+    tolerance: "±10%", part_number: "M1", quantity: 999,
+  })];
+  const r = cmp.compareBom(items, parts, 1);
+  assert.strictEqual(r.uncertain.length, 1);
+  const u = r.uncertain[0];
+  assert.strictEqual(u.candidate_value, "10uF");
+  assert.strictEqual(u.candidate_footprint, "1210");
+  assert.strictEqual(u.candidate_voltage, "50V");
+  assert.strictEqual(u.candidate_dielectric, "X7R");
+  assert.strictEqual(u.candidate_tolerance, "±10%");
+  assert.strictEqual(u.candidate_part_number, "M1");
+  assert.strictEqual(u.stock_quantity, 999);
+});
+
 /* ============================================================== 清理与汇总 */
 
 try {

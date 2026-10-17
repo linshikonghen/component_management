@@ -228,6 +228,19 @@ Oracle Agile PLM 的 AML 分层、无源器件参数组（含 Tolerance）共同
 
 **纯数字（如 `100`）不自动推断单位**——按嘉立创官方建议记入"待确认"，提示补全。
 
+**封装/容差归一（v2.11 实现补记，修「跨来源比对全缺料」）**：
+
+同一封装在不同来源写法不同：立创商城/对账单是 `0603` / `SOT-23` / `TQFN-16-EP(3x3)`；
+立创 EDA 导出的 BOM 是 `R0603` / `SOT-23_L2.9-W1.3-P1.90-LS2.4-BR` / `TQFN-16_L3.0-W3.0-P0.50-BL-EP1.1`。
+`normalize(footprint)` 统一做三件事：① `_` 之后是 EDA 的尺寸/型号后缀，不参与判定；
+② 括号里的尺寸与 `-EP`（exposed pad）不参与判定；③ 贴片被动件的 `R/C/L/D/F` 前缀去掉
+（`R0603`/`C0603` → `0603`，`F1812` → `1812`）。
+`normalize(tolerance)` 把 `±1%` / `+/-1%` / `1%` 归一（无法解析的文本退回原文，不吞字段）。
+
+> 值留空时按 v2.5 规则用**型号**兜底参与判定（"没有参数值的料，值就是型号"）——对账单导入与 BOM 比对共用这一规则。
+> 五元组仍是"同一种料"的**唯一判定键**；MPN 不参与合并判定（AML 规则不变），
+> 但比对允许用型号补充关联（见 §6 `compare:run` v2.11 注）。
+
 > 兼容：顶层仍保留 `part_number`/`manufacturer`/`supplier_part` 作为**主选料号**（= `mpn_list[0]`），
 > 便于导出与检索；`mpn_list` 承载全部等价料号。
 
@@ -438,12 +451,36 @@ fs.renameSync(tmp, target)
 |------|------|------|------|------|
 | 请求 | file_path | string | 是 | 待比对 BOM |
 | 请求 | sets | number | 否 | 套数（默认 1）；需求 = 单套数量 × sets |
+| 请求 | rulings | object | 否 | **v2.12 人工裁决**：`{ 行号: "same" \| "different" }`；same = 确认同一颗（按候选库存算缺口）、different = 不是同一颗（按缺料算）；未裁决/非法值仍留疑似。**只重分组，不写库** |
 | 响应 | ok | boolean | - | 是否成功 |
 | 响应 | compare_id | string | - | 本次比对号 |
 | 响应 | enough | CompareItem[] | - | **够用**（库中已有且库存 ≥ 需求） |
 | 响应 | shortfall | CompareItem[] | - | **缺料**（库中没有，或库存 < 需求） |
 | 响应 | uncertain | CompareItem[] | - | 疑似匹配，需人工确认 |
 | 响应 | stats | object | - | { total, enough, shortfall, uncertain, no_stock, insufficient } |
+
+> **v2.11（2026-10-17，用户实测严重 bug：「BOM 里的耗材都已入库，比对却全部判缺料」）**：
+> 比对匹配优先级（实现在 `services/compare.js` 的 `buildLibraryIndex` / `findLibraryMatch`，**比对与按 BOM 领料共用**）：
+> ① **判定键**（值/封装/耐压/材质/容差归一后）相同 → `exact`；
+> ② **型号（MPN）相同** → `mpn`（前提：两边显式"值"不冲突，防止 MPN 填错串行时乱配）——
+>    BOM 来自 EDA（封装 `R0603` / `SOT-23_L2.9-…`），库来自对账单（封装 `0603` / `SOT-23`）时，
+>    判定键对不上，型号是唯一可靠关联；
+> ③ 键字段缺失、但其余字段有相同候选 → `partial`（进**疑似**，人工裁决）；
+> ④ 否则 → `none`（缺料）。
+> 判定键本身仍**不含 MPN**（spec §5.2 / §3.1 的 AML 规则不变：合并记录时 MPN 不参与判定）；
+> 另：值为空时按 v2.5「值=型号」参与判定；封装/容差归一规则见 §3.1。
+
+> **v2.12（2026-10-17，用户实测反馈：「说是待人工确认，但是没给确认键，也是一样的，要把什么疑似什么标明」）**：
+> 「疑似」不是一句免责声明，**必须给人确认的入口**（spec FR-2.3「疑似匹配（需人工确认）」的界面落地）：
+> ① 疑似行带**候选器件身份快照** `candidate_*`（值/封装/耐压/材质/容差/型号/供应商编号），
+>    界面用「库里候选」列把"疑似的是哪一条"写出来；
+> ② 结果页「处置」列给两个完整句子的确认键：**是同一颗（按库存算）** / **不是同一颗（算缺料）**；
+>    已确认行标「已确认：同一颗 / 不是同一颗」并给「改判」撤销；
+> ③ 裁决**规则只有一份**（`services/compare.js` 的 `applyRulings`）：`same` → 按候选库存算
+>    `缺口 = max(0, 需求 − 候选库存)`；`different` → 库存按 0、缺口 = 需求；其余（含非法值）留疑似；
+> ④ 裁决只影响**这份比对结果与导出**：`compare:run` 缓存 `applyRulings` 后的结果，
+>    `compare:export` 导出的就是界面所见；**不写库、不产生变动记录**（FR-2.5/2.6 不变，验收仍用字节比对）。
+> 前端防重入：比对请求在飞时 `state.busy` 挡住重复确认（避免晚到的旧结果覆盖新裁决）。
 
 ### CompareItem
 | 方向 | 字段 | 类型 | 说明 |
@@ -465,8 +502,16 @@ fs.renameSync(tmp, target)
 | 响应 | matched_part_id | string | 匹配到的库中器件 id（无则空） |
 | 响应 | stock_quantity | number | 库中现有数量（无则 0） |
 | 响应 | shortfall_quantity | number | **缺口 = max(0, required − stock)**；导出时即 spec §4.2 的 **`purchase_quantity`**（需采购数量） |
-| 响应 | match_reason | string | exact / partial / none（partial 进 uncertain） |
+| 响应 | match_reason | string | **exact / mpn / partial / confirmed_same / confirmed_different / none**（partial 进 uncertain；**mpn = 按型号匹配**，v2.11；confirmed_* = 人工裁决后，v2.12） |
 | 响应 | missing_fields | string[] | 键字段缺失项（导致进 uncertain） |
+| 响应 | candidate_value | string | **v2.12 疑似行的候选身份快照**：库里候选的值（只有 uncertain 行非空） |
+| 响应 | candidate_footprint | string | 候选封装 |
+| 响应 | candidate_voltage | string | 候选耐压 |
+| 响应 | candidate_dielectric | string | 候选材质 |
+| 响应 | candidate_tolerance | string | 候选容差 |
+| 响应 | candidate_part_number | string | 候选型号 |
+| 响应 | candidate_supplier_part | string | 候选供应商编号 |
+| 响应 | confirmed_by_human | boolean | **v2.12 是否经人工裁决**（只有 confirmed_same / confirmed_different 行为 true） |
 
 ### compare:export
 | 方向 | 字段 | 类型 | 必填 | 说明 |
@@ -884,7 +929,7 @@ XML 转义稍错就让 Excel/立创打不开，而**失败是静默的**（文�
 | 2026-10-15 | **v1.5（实现期补记 2）** | **T5：plan 与代码对齐**（实现期结束时的文档补齐，**仍不改 spec、不改版本号**）：①**§6.5 新增"契约补记"节**，把实现期超出原契约的 **4 处**逐条写明"为什么必须补 + 影响面"——新通道 `parts:export`（FR-5.5 无载体）、`parts:list.sort_by/sort_dir`（FR-5.1）、`settings:set.confirm_data_dir`（AGENTS.md 需人工确认）、`bom:commit.sets/source/reason`（FR-1.8 与 v1.4 留痕）；**通道数 15 → 16**，`channels.js` 已同步，preload 白名单自动跟随。另**更正一处误登记**：曾把 `compare:export.include_uncertain` 当作扩展，核对后发现它**本来就在 §6.2 里**，已撤回。②**§8 目录树按实现结果补全**：新增 `services/{low_stock,parts,export_format}.js`、`ipc/{channels,extensions}.js`、`renderer/model/` 六个规则模块、`renderer/pages/` 六个页面、`assets/icon.ico`、`tests/` 与 `tools/` 的实际文件；并说明 `renderer/model/` 这一层的由来（页面规则抽成纯逻辑才可无头断言）。③**§9 任务表状态**：T0~T16 全部实现，其中 T13b（自写 xlsx 写入器）与 T13c（导出格式层）按 §10.1 的分级验收执行——**同源回读 + 跨实现判卷**双证；T16 离线全流程验收一次跑完 AC-1~AC-9（PASS 38 / FAIL 0 / 待人工 2）。④**验收口径**：`tests/run_all.js` 一条命令跑完 20 个套件；`tests/test_acceptance_full.js` 按用户真实使用顺序在同一个库上走完全流程并生成验收报告。⑤**仍待用户裁决**（**未擅改 spec**）：附录 A/B 与实测不符、阈值留空语义冲突（AC-4 vs FR-4.8/AC-9）、`BomItem.location/min_quantity` 缺载体。 |
 | 2026-10-16 | **v1.5（实现期补记 3）** | **反重复清理与文档收口**（仍**不改 spec、不改版本号**）：①新增 `src/services/ids.js` 作为**运行号/时间戳/序 id 的唯一实现**——此前 `YYYYMMDD_HHMMSS` 在 5 处各写一份（`bom_parser.makeBatchId`、`compare.makeCompareId`、`ipc/handlers.makeRunId` 与 `defaultExportName`、`store.timestamp`）、`p_0001` 序 id 在 `parts.js` 与 `inventory.js` **逐字重复**（AGENTS.md 反重复规则明令禁止保留两份；同一件事有两个真相，改精度必漏一处）；②顺带修一处**时钟没接通**：`bom:parse` / `compare:run` / `stock:pick_by_bom` 三个 handler 调解析时未传注入的 `now`，于是运行号取自墙上时钟、测试无法钉死——现已统一传 `clock()`；③`tests/run_all.js` 由**逐条登记**改为**扫描 `tests/test_*.js`**：实现期每加一个套件都要回来改这个与测试内容无关的文件（改错过一次顺序），现在新套件放进去就会被跑到，**漏登记不会导致漏测**；④§8 目录树补 `ids.js`。**未采纳的建议**：`dialog:saveFile` 通道——收益（少手输一次路径）不足以抵消契约再扩一次通道的代价（plan §1 明确"不做安装包、直接运行"，导出默认名已含时间戳且可手输），故**不新增该通道**。 |
 | 2026-10-16 | **v1.5（实现期补记 4）** | **对抗性审计 → 缺陷修复批次**（仍**不改 spec、不改版本号**）。背景：两轮**独立上下文**的对抗性审计（报告：`.addmodel/upload/audit-findings.md` + 评审件）报了 9 条**能举证的**真缺陷，全部**先自己复现再修**，并逐条固化成回归用例 `tests/test_audit_fixes.js`（17 条）。修复清单：①**按 BOM 领料同判定键多行重复扣减 → 库存变负**（`pickByBom` 按器件累计"本批已规划扣减"，只用剩余可用量判充足；`allow_partial=false` 的整单拒绝这才真正生效）；②**恢复备份"边读边写"**（改为**全部读入并校验后再写**；校验 schema_version 与形状；**恢复不覆盖 `data_dir`**——那是机器本地设置，照搬会写到别的路径并绕过确认闸门；**空库的备份（只有 manifest+settings）现在也能恢复**）；③**核对表「备注」静默丢弃**（FR-1.6 可改字段，补进 `newPartFromItem`/`mergePartInfo`）；④**疑似条目导出数量列恒为 0**（按 spec §4.2 公式补 `shortfall_quantity = max(0, 需求−候选库存)`）；⑤**变动记录逐条写**（新增 `store.appendMovements` 批量一次写 + parts 写失败时 `dropMovements` **补偿**——"要么两边都成，要么都不留"，不再留同 ref 的幽灵留痕）；⑥`stock:move` 不再透传契约外的 `kind`/`ref`，且 `kind` 与 `delta` 方向必须自洽；⑦**删除器件不留痕 + id 被复用**（补 `adjust` 留痕；`nextPartId` 把变动记录的 `part_id` 也算进"用过的号"）；⑧`stock:pick_by_bom` 服务端**补上 `reason` 必填校验**（原先只有界面拦）；⑨运行号撞车加后缀（见 §6.5 第 8 条）。**另**：`compare:export` 改用**只读**取设置（`store.peekSettings`），修掉"比对顺手写出一个 settings.json"（FR-2.6）。**审计里两条"未验证疑点"也已处置**：⑩变动记录排序改为**按真时间**（`Date.parse` 数值比较）——原来比字符串，`at` 混着不同时区偏移时（换机器恢复备份、系统时区/DST 变化）先后会排错；⑪`bom:commit` 闸门**从"只认 batch_id"加强为"还认该批次解析出的行号集合"**——只认号的话，调用方拿到一个号就能塞进**解析时根本没有的条目**；用 `row_no` 当凭据，是因为它**不在 FR-1.6 的可改字段里**，逐字段比对反而会把合法编辑判成伪造（两条都有回归用例）。 |
-| 2026-10-16 | **v1.5（实现期补记 5）** | **第三轮对抗性审计（换面：`renderer/model`、xlsx 写入侧、`main.js`/`preload.js`）→ 修复**（仍**不改 spec、不改版本号**）。报告：`.addmodel/upload/audit-findings-r3.md`。①**离线机制补严**（FR-6.1）：原来只订阅了 5 种 URL scheme，**没有** `setWindowOpenHandler`、**没有** `will-navigate`——审计用桩 Electron 跑真 `main.js` 实测 `setWindowOpenHandler = NOT-SET`；且原注释自称"拦截**一切**外部请求"，**注释比实现更满**。现补上两道闸（新窗口一律 deny；顶层导航只放行自己的 index.html，用 `fileURLToPath` 解析）并把注释改成如实描述；②**写入器补单元格长度闸**：行/列数早有守卫、文本长度没有——超过 Excel 上限（32767）会让文件被判"损坏"。常量 `MAX_CELL_CHARS` 收进 `xlsx_xml`（读写两侧共用一处），写入器**默认报错**、导出层**截断+警示**（`buildLibraryRows` 也补上，此前只有配单导出做了）；③**参数列顺序改为照 spec 的拼写规范示例（line 272）与 AC-8 验收表（line 525）**：`值 → 容差 → 耐压 → 材质`（+功率、载流）。**这暴露了 spec 的第三处自相矛盾**：spec line 239 的列来源表写的是 `value + voltage + dielectric + tolerance`，与上述两处不同；取舍理由见下方"待裁决"——**已立任务等用户拍板**；④`settings_model.validateThreshold` 拒绝类型不对的值（`true`/`[]`/`["7"]` 不再被 `Number()` 强转）；⑤`settings_model.lowStockLines` 对数组元素补 `|| {}` 兜底（原来遇 `null` 抛 TypeError → **设置页整屏白**）；⑥`readZipEntries` 遇**重名条目**报错而不是静默覆盖（规范化：变体 zip 构造器抽到 `tests/fake_zip.js`，两处共用）。 |
+| 2026-10-16 | **v1.5（实现期补记 5）** | **第三轮对抗性审计（换面：`renderer/model`、xlsx 写入侧、`main.js`/`preload.js`）→ 修复**（仍**不改 spec、不改版本号**）。报告：`.addmodel/upload/_archive/audit-findings-r3.md`（2026-10-17 归档）。①**离线机制补严**（FR-6.1）：原来只订阅了 5 种 URL scheme，**没有** `setWindowOpenHandler`、**没有** `will-navigate`——审计用桩 Electron 跑真 `main.js` 实测 `setWindowOpenHandler = NOT-SET`；且原注释自称"拦截**一切**外部请求"，**注释比实现更满**。现补上两道闸（新窗口一律 deny；顶层导航只放行自己的 index.html，用 `fileURLToPath` 解析）并把注释改成如实描述；②**写入器补单元格长度闸**：行/列数早有守卫、文本长度没有——超过 Excel 上限（32767）会让文件被判"损坏"。常量 `MAX_CELL_CHARS` 收进 `xlsx_xml`（读写两侧共用一处），写入器**默认报错**、导出层**截断+警示**（`buildLibraryRows` 也补上，此前只有配单导出做了）；③**参数列顺序改为照 spec 的拼写规范示例（line 272）与 AC-8 验收表（line 525）**：`值 → 容差 → 耐压 → 材质`（+功率、载流）。**这暴露了 spec 的第三处自相矛盾**：spec line 239 的列来源表写的是 `value + voltage + dielectric + tolerance`，与上述两处不同；取舍理由见下方"待裁决"——**已立任务等用户拍板**；④`settings_model.validateThreshold` 拒绝类型不对的值（`true`/`[]`/`["7"]` 不再被 `Number()` 强转）；⑤`settings_model.lowStockLines` 对数组元素补 `|| {}` 兜底（原来遇 `null` 抛 TypeError → **设置页整屏白**）；⑥`readZipEntries` 遇**重名条目**报错而不是静默覆盖（规范化：变体 zip 构造器抽到 `tests/fake_zip.js`，两处共用）。 |
 | 2026-10-16 | **v1.5（实现期补记 6）** | **AC-8 外部验收通过 + 人工签收机制**（仍**不改 spec、不改版本号**）：①**用户实测：导出文件上传立创商城 BOM 智能云表，识别成功**——这是 AC-8 的**外部一级**验收，也是本工程此前唯一无法自证的环节（工具完全离线、没有任何上传通道，属设计而非缺失）。与内部的"独立实现判卷"（Python zipfile/xml.etree/openpyxl）合起来，AC-8 的两级都齐了。②为此新增**可撤销的人工签收机制**：`tests/test_acceptance_full.js` 读 `.addmodel/human-signoff.json`，某键 `verified:true` → 该项记为「✅ 通过（人工验证）」并把 at/by/note 写进报告证据列，没有记录 → 仍记「⏸ 待人工」。**为什么不直接在报告里写一句"已通过"**：报告每次运行都重新生成，手写的一句会被冲掉；而签收文件**可审计、可撤销**——删掉记录，该项下次跑就自动回到"待人工"。**这一版我发现并修掉自己一个静默 bug**：第一版把整个查找包在 try 里，自己写错变量名（用了未定义的 `PROJECT_ROOT`，本文件里叫 `ROOT`），ReferenceError 被吞掉 → 已签收的项**静默**显示成"待人工"；现在只有"文件不存在"才返回未签收，**记录损坏一律抛错**。③**快捷方式**：`tools/make-shortcut.ps1` 跑通并已在工作区生成 `元器件管理.lnk`（用 COM 读回校验：目标/工作目录/图标），并已复制到用户桌面。**记账**：脚本本身没坏——是**我这边的沙箱不允许写工作区之外的路径**（往桌面写普通文本同样被拒），所以"放到桌面"这一步必须由用户或提权执行；README 里写清了这条与自建快捷方式的位置。 |
 | 2026-10-16 | **v1.6（实现期补记 7）** | **快捷方式图标根因 + 两处被实测暴露的问题**（仍**不改 spec 语义、不改版本号**）：①**图标为什么不生效——根因在沙箱 ACL，不在图标**：用户反馈桌面快捷方式显示 Electron/通用图标。定位过程（都是实测，非猜测）：Pillow 独立判卷证明 `assets/icon.ico` 结构合法（3 个尺寸、RGBA、像素正常）→ 用 Windows **shell 自己的 API**（`SHGetFileInfo`）取快捷方式的图标并与我的像素对比 → 渲染出的是**通用快捷方式图标**；再做**四组对照**：`electron.exe,0`（Electron 图标 ✓ 说明 IconLocation 生效）、`shell32.dll,13`（✓）、**工作区外**的现成 .ico（✓）、**工作区内**的 .ico（✗ 通用图标）—— 连 Pillow 现写的红方块 .ico 放进工作区也一样失败，换新文件名同样失败（排除缓存）⇒ **凡是位于工作区内的 .ico，Explorer 的图标渲染路径都读不到**（工作区被沙箱加了 ACL/完整性标签）。**修法**：`make-shortcut.ps1` 自动把图标复制到 `%LOCALAPPDATA%\component_management\icon.ico` 并用**那一份**（复制后做字节一致性校验，失败则明确提示）。修完复验：shell 渲染的中心像素由 `(250,250,250)`（通用）变为 **`(243,244,246)`（我的图标）** ✓ ②**我改脚本时把 UTF-8 BOM 弄丢了**：编辑工具保存后 .ps1 无 BOM，PS 5.1 按系统 GBK 解释中文 → 整片乱码 → **语法错误、脚本静默没生效**（表现是"改了但没变化"）。已补 BOM，并额外用 PS 5.1 自己的解析器做语法自检；此类文件（含中文的 .ps1）**必须存为带 BOM 的 UTF-8**，已列入踩坑清单。③**测试隔离断言改快照比对**：旧写法断言"项目 `data/` 必须不存在"，在**用户真的双击用过工具之后必然变红**（真实库本就该被建起来）——那是正常使用，不是测试污染。新增共享助手 `tests/real_data_guard.js`：套件加载时给 `data/` 拍快照（相对路径 + 大小 + mtime + 内容哈希），断言时再拍一次比对，**只守"本套件没碰真实库"**；`test_store.js` / `test_main_wiring.js` 两处改为调用它。 |
 | 2026-10-16 | **v2.1** | **分类统一（用户裁定①）**：`category` 存立创中文名；`src/services/categories.js` 为映射与阈值的单一来源（类表照 spec §5.3）；`lcsc_statement.thresholdKey` 未命中时改查该模块；`parts.js` 保存时校验分类；AC-9 增补四行。 |
