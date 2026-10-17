@@ -1,0 +1,17 @@
+{
+  "name": "component-management",
+  "version": "1.1.0",
+  "private": true,
+  "description": "元器件管理 — 本地离线的电子元器件库存管理工具（Electron + 原生 HTML/JS，零 npm 依赖）",
+  "main": "src/main.js",
+  "scripts": {
+    "start": "electron .",
+    "smoke": "electron . --smoke",
+    "test": "node tests/run_all.js"
+  },
+  "dependencies": {},
+  "devDependencies": {},
+  "engines": {
+    "node": ">=18"
+  }
+}
