@@ -61,6 +61,12 @@ const COVERAGE = {
   "AC-2:8": { by: "test_compare.js + test_acceptance_full.js", status: "auto", must: "比对时库为空" },
   "AC-2:9": { by: "test_compare_model.js + test_compare.js", status: "auto", must: "无需采购" },
   "AC-2:10": { by: "test_compare_model.js + test_ids.js", status: "auto", must: "含时间戳" },
+  // v2.2（用户 2026-10-17 需求）：缺料人工匹配 / 疑似中转 / 字段同步（预览闸门与拒绝伪造各一行）
+  "AC-2:11": { by: "test_compare.js + test_ipc_handlers.js + test_renderer_pages.js", status: "auto", must: "按被匹配器件库存" },
+  "AC-2:12": { by: "test_compare.js + test_renderer_pages.js", status: "auto", must: "保留两个确认按钮" },
+  "AC-2:13": { by: "test_ipc_handlers.js + test_renderer_pages.js", status: "auto", must: "movements 新增 1 条" },
+  "AC-2:14": { by: "test_ipc_handlers.js", status: "auto", must: "一个字节都不变" },
+  "AC-2:15": { by: "test_compare.js + test_ipc_handlers.js", status: "auto", must: "服务端也拒绝" },
 
   /* ------------------------------------------------ AC-3 手动录入（5 行） */
   "AC-3:1": { by: "test_parts.js + test_acceptance_full.js + test_renderer_pages.js", status: "auto", must: "直接手动录入 1 条" },

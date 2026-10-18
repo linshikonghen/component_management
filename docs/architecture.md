@@ -126,6 +126,9 @@ src/main.js ──→ src/ipc/{channels,handlers} + src/services/store.js（仅�
 - service 抛错 → IPC 层统一 `{ ok: false, error }` → 页面显示；不吞错、不假装成功。
 - 写 JSON 一律 `store.js`：同目录临时文件 + `rename` 原子替换；数量变动必须写 `movements.json` 留痕。
 - 比对/解析等只读路径禁止写库（`compare.js` 不导入写函数，验收用前后字节快照证明）。
+  **唯一例外**（spec FR-2.15）：比对页缺料行「人工匹配」后可选择把 BOM 判定键值同步进被匹配器件，
+  走独立通道 `compare:sync_fields`（`confirm !== true` 只预览、零写入；写入时先留 movements 再写 parts）。
+  `compare:run` / `compare:export` 本身仍然零写入。
 - 危险操作（删除器件、恢复备份、合并同规格、入库）必须有闸门：页内确认 + 服务端拒绝/确认参数两层。
 
 ## 6. 测试分层
@@ -181,4 +184,45 @@ src/main.js ──→ src/ipc/{channels,handlers} + src/services/store.js（仅�
 
 **清理原则**：删前先归档（能压缩的压缩），**删摘要不删事实**——每次清理都要能回答
 "原来是什么、现在在哪里"。追溯入口：`_archive/` 下的 INDEX 与本表。
+
+## 11. 行业标准合规与已知取舍（2026-10-18 全面审计）
+
+本轮按「先测试 → 全面审计 → 再 git」的顺序做了一次全项目体检，结论与**有意保留的取舍**如下。
+**取舍不是遗漏**：每条都写了"为什么这样"，评审时不必再当缺陷提。
+
+### 11.1 合规项（已对齐行业常规）
+
+| 维度 | 现状 |
+|---|---|
+| 分层与依赖方向 | `renderer → lib/model → IPC → services → store`，`test_architecture.js` 13 条静态规则强制；services 不依赖 Electron/DOM/IPC，renderer 无 require/fetch |
+| 进程隔离与安全基线 | `contextIsolation: true` · `nodeIntegration: false` · `webSecurity: true` · `setWindowOpenHandler` 全拒 · `will-navigate` 白名单 · 主进程 `webRequest.onBeforeRequest` 拦截外部请求 · 页面 CSP `default-src 'self'; connect-src 'none'` |
+| 契约单一来源 | IPC 通道只在 `src/ipc/channels.js`；preload 由清单生成、不硬编码；请求/响应字段以 `plan.md` §6 为准，`test_ipc_handlers.js` 断言通道集合 == plan §6 |
+| 唯一实现（反重复） | 服务层小工具 `value_util.js`、渲染基建 `ui_util.js`、判定键 `compare.dedupeKey`、id/时间戳 `ids.js`、表头识别 `table_header.js`、EXCEL 单元格坐标 `xlsx_xml.js`；均有静态检查或断言 |
+| 写入安全 | 一律 `store.js` 原子写（同目录 tmp → fsync → rename）；数量变动必留 `movements`；`persist()` 先 movements 后 parts，失败补偿 |
+| 危险操作闸门 | 删除/恢复/改数据目录/同规格合并在**服务端**拒绝（不只靠按钮 disabled），并有页面确认 |
+| 测试分层 | 单元（服务/模型）/ 页面级假 DOM / 接线（桩 Electron）/ 架构静态 / 验收（AC 逐行）/ NFR；`run_all` 扫描式发现，漏登记不会漏测 |
+| CI | `.github/workflows/ci.yml`：windows-latest 跑全量套件 + 文案星号 + 双文档门禁 + 安装包回归 |
+| 依赖 | 零 npm 依赖（`dependencies`/`devDependencies` 均为空，有断言）；xlsx 读写自写（`zip_container` + `xlsx_xml`） |
+| 版本与发布 | `package.json` 版本 + `docs/releases.md` 发布事实登记（含资产 SHA256）+ 脱敏公开快照（单提交、自检闸门） |
+
+### 11.2 有意保留的取舍（不是缺陷）
+
+| 取舍 | 为什么这样 |
+|---|---|
+| `sandbox: false` | preload 需要 `require` 本项目的 `./ipc/channels`（纯数据清单）。渲染进程侧的隔离仍由 `contextIsolation: true` + `nodeIntegration: false` + 不暴露 `ipcRenderer` 保证；若将来把通道清单内联进 preload，可改回 `sandbox: true`（记为改进项，非当前风险） |
+| `renderer/model/*` 各自带 `toInt` / `isBlank` | 这些 model 要求**同时**在浏览器（`<script>`）与 Node（`require`）下可加载，且渲染层明文禁止 `require` ⇒ 不能共享 `ui_util` 或服务层 `value_util`。服务层唯一实现仍是 `value_util.js`（有断言）；渲染层的重复是**加载模型的代价**，且每个都是 3 行小函数 |
+| 服务层导出面偏宽（约 50 个导出无外部引用） | 这些是"模块内的原语 + 对外只暴露少量入口"的常规模式（如 `part_search` 导出内部规则便于将来单测）。**没有一个是死代码**（审计确认：0 个函数既不被内部调用也无外部引用）；删导出只减 API 面、不减代码，收益低于风险，故保留 |
+| 没有 `LICENSE` / `CHANGELOG` / `CONTRIBUTING` | 本项目是**个人自用工具**，非开源协作项目（公开仓库是脱敏快照、无历史）。发布信息集中在 `docs/releases.md`；仓库若将来要开源，补 `LICENSE` 即可（代码与文档不依赖它） |
+| `dist/` 保留两代安装包 | `dist/` 已 gitignore、可重建；保留 v1.1.1/v1.1.2 便于对照（约 283MB 磁盘，不影响仓库） |
+| 比对只读的**唯一例外** | `compare:sync_fields`（用户 2026-10-17 明确要求：人工匹配后可选把 BOM 判定键值同步回库）。两层闸门：先预览（零写入）→ 显式 `confirm: true` 才写，且强制留 `adjust`（delta=0）变动记录。`compare:run` / `compare:export` 仍字节不变 |
+
+### 11.3 发现的真实问题与处置
+
+| 问题 | 处置 |
+|---|---|
+| 文档里 4 处**过时数字**（plan 说 24 套件、README 说 AC 78 行、PUBLIC_README 说 35 套件、CI 注释说 15 套件） | 已全部按实测修正（47 套件 / AC 83 行 / 公开版 26 套件） |
+| `.addmodel/upload/` 残留 4 个一次性脚本/临时文件（`_probe_manual_match.js`、`_probe_t119.js`、`_commitmsg31.txt`、`_ui_probe_statement.html`） | 已删除（均为 untracked；探针结论已写进 T119 证据文件，不丢事实） |
+| `.addmodel/backups/` 留着 2 份 hub 备份 | 只留最新 1 份（旧份删除，约省 4.8MB） |
+| 代码无冲突标记、无 `.orig/.rej`、无 UTF-8 损坏、工作树干净 | 审计确认无需处置 |
+
 

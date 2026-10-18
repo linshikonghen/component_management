@@ -32,6 +32,7 @@ const inventory = require("../services/inventory");
 const partsSvc = require("../services/parts");
 const storeSvc = require("../services/store");
 const ids = require("../services/ids");
+const { toInt } = require("../services/value_util");
 const { CHANNELS } = require("./channels");
 
 /** 比对结果缓存条数（compare:export 按 compare_id 取回当次结果） */
@@ -285,19 +286,28 @@ function createHandlers(deps = {}) {
         const sets = r.sets == null ? 1 : r.sets;
         const parsed = bomParser.parseBomFile(r.file_path, sets, { now: clock() });
         if (!parsed.ok) return Object.assign({ ok: false, error: parsed.error }, empty);
-        const result = compareSvc.compareBom(parsed.items, db.loadParts(), sets);
+        const library = db.loadParts();
+        const result = compareSvc.compareBom(parsed.items, library, sets);
         if (!result.ok) return Object.assign({ ok: false, error: result.error }, empty);
         // 人工裁决（比对页的「是同一颗/不是同一颗」按钮）：**只调整这份结果的分组与导出内容**，
         // 不写库、不产生变动记录（FR-2.5/2.6 仍然成立）。
         const adjusted = compareSvc.applyRulings(result, r.rulings == null ? null : r.rulings);
         if (!adjusted.ok) return Object.assign({ ok: false, error: adjusted.error }, empty);
+        // 人工匹配（「未匹配的缺料行 → 库里某条器件」）：同样**只改这份结果**（按被匹配器件库存算），
+        // 不写库；字段同步是另一个显式通道 compare:sync_fields（用户确认后才落库，spec FR-2.15）。
+        const matched = compareSvc.applyManualMatches(
+          adjusted,
+          r.manual_matches == null ? null : r.manual_matches,
+          library
+        );
+        if (!matched.ok) return Object.assign({ ok: false, error: matched.error }, empty);
         // 同一秒内重复比对也要拿到不同的 compare_id（否则 compare:export 可能导出另一次的结果）
         const compare_id = nextRunId("compare", clock(), issuedRunIds);
         // 缓存当次结果供 compare:export 使用（**只缓存，不落盘**：比对永远只读）
-        rememberCompare({ compare_id, file_path: r.file_path, sets, result: adjusted });
+        rememberCompare({ compare_id, file_path: r.file_path, sets, result: matched });
         return ok({
-          compare_id, enough: adjusted.enough, shortfall: adjusted.shortfall,
-          uncertain: adjusted.uncertain, stats: adjusted.stats,
+          compare_id, enough: matched.enough, shortfall: matched.shortfall,
+          uncertain: matched.uncertain, stats: matched.stats,
         });
       } catch (exc) {
         return fail(exc);
@@ -333,7 +343,61 @@ function createHandlers(deps = {}) {
       }
     },
 
-    /* ------------------------------------------------------------ 器件 */
+    /**
+     * 比对页「人工匹配 → 同步判定键字段」（spec FR-2.15；用户 2026-10-17 需求）。
+     *
+     * **两层闸门**：`confirm !== true` 只返回"旧值 → 新值"预览（不落盘）；只有 `confirm === true`
+     * 且确有差异时才写库。写库动作 = 改被匹配器件的判定键五字段 + 一条 movements（adjust，delta=0，
+     * before=after=当前数量）留痕；先写变动记录再写 parts（与 parts:save 同一落盘顺序，失败可补偿）。
+     *
+     * 唯一性防御：改完若与库中**另一条**器件同判定键就拒绝（正常路径不会发生——能人工匹配的行
+     * 本来就是"和库里谁都对不上"的缺料行；这里防的是并发/手改数据造成的意外）。
+     */
+    "compare:sync_fields": async (req) => {
+      const r = req || {};
+      const empty = { applied: false, changes: [], part: null };
+      try {
+        const partId = String(r.part_id == null ? "" : r.part_id).trim();
+        if (partId === "") return Object.assign({ ok: false, error: "缺少要同步的器件 id（part_id）" }, empty);
+        const library = db.loadParts();
+        const index = library.findIndex((p) => String(p.id) === partId);
+        if (index < 0) return Object.assign({ ok: false, error: `器件不存在：${partId}` }, empty);
+        const part = library[index];
+        const built = compareSvc.buildFieldChanges(part, r.fields);
+        if (!built.ok) return Object.assign({ ok: false, error: built.error }, empty);
+        if (built.changes.length === 0) return ok({ applied: false, changes: [], part });
+        // 第一层：没有人工确认 → 只给预览，**一个字节都不写**
+        if (r.confirm !== true) return ok({ applied: false, changes: built.changes, part });
+
+        const updated = compareSvc.applyFieldChanges(part, built.changes);
+        const clash = library.find((p, i) => i !== index && compareSvc.dedupeKey(p) === compareSvc.dedupeKey(updated));
+        if (clash) {
+          return Object.assign({
+            ok: false,
+            error: `不能同步：改完会与库里已有的「${clash.value} / ${clash.footprint}」（${clash.id}）同规格，请先处理重复`,
+          }, empty);
+        }
+        updated.updated_at = storeSvc.nowIso(clock());
+        const nextLibrary = library.slice();
+        nextLibrary[index] = updated;
+        const summary = built.changes
+          .map((c) => `${compareSvc.KEY_FIELD_LABELS[c.field] || c.field}「${c.from}」→「${c.to}」`)
+          .join("；");
+        const rowNo = String(r.row_no == null ? "" : r.row_no).trim();
+        const quantity = toInt(updated.quantity);
+        const stored = persist({
+          parts: nextLibrary,
+          movements: [{
+            part_id: updated.id, kind: "adjust", delta: 0, before: quantity, after: quantity,
+            reason: `比对页人工匹配同步字段：${summary}` + (rowNo === "" ? "" : `（来源：比对第 ${rowNo} 行）`),
+            ref: "",
+          }],
+        });
+        return ok({ applied: true, changes: built.changes, part: updated, movement: stored[0] || null });
+      } catch (exc) {
+        return fail(exc);
+      }
+    },
 
     "parts:list": async (req) => {
       const r = req || {};

@@ -617,6 +617,131 @@ t("比对输出的疑似行带**候选器件身份快照**（界面要标清疑�
   assert.strictEqual(u.stock_quantity, 999);
 });
 
+/* ====================== §9 缺料人工匹配 + 判定键字段同步（spec v2.2） */
+
+section("§9 人工匹配 applyManualMatches（只重分组，不写库）");
+
+/** 造一份 applyRulings 之后的结果：2 条真缺料 + 1 条"已匹配但库存不足" + 1 条疑似 */
+function afterRulingsResult() {
+  return {
+    ok: true, compare_id: "compare_test",
+    enough: [],
+    shortfall: [
+      { row_no: 17, required_quantity: 10, value: "10uF", footprint: "C1210", voltage: "", dielectric: "", tolerance: "", match_reason: "none", stock_quantity: 0, shortfall_quantity: 10 },
+      { row_no: 27, required_quantity: 2, value: "", footprint: "", voltage: "", dielectric: "", tolerance: "", match_reason: "confirmed_different", stock_quantity: 0, shortfall_quantity: 2 },
+      { row_no: 30, required_quantity: 5, value: "1k", footprint: "R0603", voltage: "", dielectric: "", tolerance: "", match_reason: "exact", stock_quantity: 3, shortfall_quantity: 2 },
+    ],
+    uncertain: [
+      { row_no: 40, required_quantity: 1, value: "22uF", footprint: "C1206", voltage: "", dielectric: "", tolerance: "", match_reason: "partial", stock_quantity: 5, shortfall_quantity: 0, missing_fields: ["tolerance"] },
+    ],
+    stats: { total: 4, enough: 0, shortfall: 3, uncertain: 1, no_stock: 2, insufficient: 1 },
+  };
+}
+
+const MATCH_PARTS = [
+  { id: "p_a", value: "10uF", footprint: "1210", voltage: "50V", dielectric: "X7R", tolerance: "±10%", quantity: 4, part_number: "M1" },
+  { id: "p_b", value: "10uF", footprint: "1210", voltage: "50V", dielectric: "X7R", tolerance: "±10%", quantity: 999 },
+];
+
+t("人工匹配缺料行 → 按被匹配器件库存归组（4<10 进缺料；999≥10 进够用），带候选身份快照", () => {
+  const first = cmp.applyManualMatches(afterRulingsResult(), { 17: "p_a" }, MATCH_PARTS);
+  assert.strictEqual(first.ok, true, first.error);
+  const row17 = first.shortfall.find((x) => x.row_no === 17);
+  assert.ok(row17, "库存 4 < 需求 10 → 仍在缺料组");
+  assert.strictEqual(row17.match_reason, "manual_match");
+  assert.strictEqual(row17.confirmed_by_human, true);
+  assert.strictEqual(row17.matched_part_id, "p_a");
+  assert.strictEqual(row17.stock_quantity, 4);
+  assert.strictEqual(row17.shortfall_quantity, 6);
+  assert.strictEqual(row17.candidate_value, "10uF", "要带被匹配器件身份快照");
+
+  const second = cmp.applyManualMatches(afterRulingsResult(), { 17: "p_b" }, MATCH_PARTS);
+  const moved = second.enough.find((x) => x.row_no === 17);
+  assert.ok(moved, "库存 999 ≥ 需求 10 → 进够用组");
+  assert.strictEqual(moved.shortfall_quantity, 0);
+  assert.strictEqual(second.stats.enough, 1);
+});
+
+t("只有 none / confirmed_different 的缺料行能人工匹配；已匹配仅库存不足 → 服务端拒绝", () => {
+  assert.strictEqual(cmp.isManualMatchable({ match_reason: "none" }), true);
+  assert.strictEqual(cmp.isManualMatchable({ match_reason: "confirmed_different" }), true);
+  for (const reason of ["exact", "mpn", "confirmed_same", "manual_match", "partial"]) {
+    assert.strictEqual(cmp.isManualMatchable({ match_reason: reason }), false, reason + " 不应允许人工匹配");
+  }
+  const bad = cmp.applyManualMatches(afterRulingsResult(), { 30: "p_b" }, MATCH_PARTS);
+  assert.strictEqual(bad.ok, false);
+  assert.ok(/不是"未匹配的缺料"/.test(bad.error), bad.error);
+  // 疑似行不在 shortfall 里：给它传匹配关系 = 忽略（不会把它悄悄变成匹配）
+  const ignore = cmp.applyManualMatches(afterRulingsResult(), { 40: "p_b" }, MATCH_PARTS);
+  assert.strictEqual(ignore.ok, true, ignore.error);
+  assert.strictEqual(ignore.uncertain.length, 1);
+  assert.strictEqual(ignore.uncertain[0].match_reason, "partial");
+});
+
+t("要匹配的器件不存在 / manual_matches 非法 → 明确报错（不是静默忽略）", () => {
+  const gone = cmp.applyManualMatches(afterRulingsResult(), { 17: "p_gone" }, MATCH_PARTS);
+  assert.strictEqual(gone.ok, false);
+  assert.ok(/不存在|已被删除/.test(gone.error), gone.error);
+  const bad = cmp.applyManualMatches(afterRulingsResult(), [1, 2], MATCH_PARTS);
+  assert.strictEqual(bad.ok, false);
+  assert.ok(/manual_matches 必须是对象/.test(bad.error), bad.error);
+  const none = cmp.applyManualMatches(afterRulingsResult(), null, MATCH_PARTS);
+  assert.strictEqual(none.ok, true);
+  assert.strictEqual(none.shortfall.length, 3, "没传匹配关系 → 原样返回");
+});
+
+section("§9b 字段同步 buildFieldChanges / applyFieldChanges（写库前的纯计算）");
+
+t("只同步 BOM 有值的字段；BOM 空字段不动库里原值", () => {
+  const libPart = { value: "10uF", footprint: "0603", voltage: "", dielectric: "", tolerance: "" };
+  const ch = cmp.buildFieldChanges(libPart, {
+    value: "22uF", footprint: "", voltage: "", dielectric: "", tolerance: "",
+  });
+  assert.strictEqual(ch.ok, true, ch.error);
+  assert.deepStrictEqual(ch.changes.map((c) => c.field), ["value"]);
+  assert.strictEqual(ch.changes[0].from, "10uF");
+  assert.strictEqual(ch.changes[0].to, "22uF");
+});
+
+t("归一后相同 → 不产生变更（C1210/1210、+/-10%/±10%、50v/50V 都不算差异）", () => {
+  const libPart = { value: "100nF", footprint: "1210", voltage: "50V", dielectric: "X7R", tolerance: "±10%" };
+  const ch = cmp.buildFieldChanges(libPart, {
+    value: "0.1uF", footprint: "C1210", voltage: "50v", dielectric: "x7r", tolerance: "+/-10%",
+  });
+  assert.deepStrictEqual(ch.changes, [], "写法差异不应写库");
+});
+
+t("落库写的是**规范值**：0.01mF→10uF、EDA 封装去装饰、±10%；耐压/材质保留原写法", () => {
+  const libPart = { value: "1uF", footprint: "0603", voltage: "25V", dielectric: "X5R", tolerance: "±5%" };
+  const ch = cmp.buildFieldChanges(libPart, {
+    value: "0.01mF", footprint: "C1210", voltage: "50V", dielectric: "X7R", tolerance: "+/-10%",
+  });
+  const byField = {};
+  for (const c of ch.changes) byField[c.field] = c;
+  assert.strictEqual(byField.value.to, "10uF");
+  assert.strictEqual(byField.footprint.to, "1210", "EDA 写法要去装饰（R0603/C1210 → 0603/1210）");
+  assert.strictEqual(byField.tolerance.to, "±10%");
+  assert.strictEqual(byField.voltage.to, "50V", "耐压保留原写法");
+  assert.strictEqual(byField.dielectric.to, "X7R", "材质保留原写法");
+  // 型号式值（没有数字+单位）保留原样写法，不被 lower-case 掉
+  const named = cmp.buildFieldChanges({ value: "AO3401A" }, { value: "AO3401A" });
+  assert.deepStrictEqual(named.changes, [], "完全相同 → 无变更");
+  const named2 = cmp.buildFieldChanges({ value: "" }, { value: "MX1.25" });
+  assert.strictEqual(named2.changes.length, 1);
+  assert.strictEqual(named2.changes[0].to, "MX1.25", "型号式值不能被小写化");
+});
+
+t("applyFieldChanges：返回新对象（不改入参）、只接受判定键五字段", () => {
+  const part = { id: "p_x", value: "10uF", footprint: "1210", quantity: 5 };
+  const updated = cmp.applyFieldChanges(part, [{ field: "footprint", from: "1210", to: "0805" }]);
+  assert.strictEqual(updated.footprint, "0805");
+  assert.strictEqual(updated.id, "p_x");
+  assert.strictEqual(updated.quantity, 5, "数量/其他字段不能被动");
+  assert.strictEqual(part.footprint, "1210", "入参不能被就地修改");
+  assert.throws(() => cmp.applyFieldChanges(part, [{ field: "quantity", to: "9" }]), /只允许/);
+  assert.throws(() => cmp.applyFieldChanges(part, { field: "value" }), /必须是数组/);
+});
+
 /* ============================================================== 清理与汇总 */
 
 try {

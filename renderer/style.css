@@ -366,3 +366,19 @@ td.row-actions button { padding: 2px 8px; font-size: 12px; margin-right: 6px; }
 .modal .hint { margin: 6px 0; }
 .modal .form-actions { margin-top: 14px; }
 
+/* 人工匹配的器件选择器（比对页）：可搜索的候选列表 */
+.modal.match-picker { width: min(760px, 92vw); }
+.modal.match-picker .file-box { width: 100%; }
+.match-list {
+  margin-top: 8px; max-height: 46vh; overflow-y: auto;
+  border: 1px solid var(--line); border-radius: 8px;
+}
+.match-list button.match-option {
+  display: block; width: 100%; text-align: left; padding: 6px 10px;
+  border: 0; border-bottom: 1px solid var(--line); background: transparent;
+  cursor: pointer; font-size: 13px;
+}
+.match-list button.match-option:last-child { border-bottom: 0; }
+.match-list button.match-option:hover { background: var(--hover, rgba(0, 0, 0, .05)); }
+.match-list button.match-option strong { font-weight: 600; }
+

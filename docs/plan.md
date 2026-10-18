@@ -1,7 +1,7 @@
 # 元器件管理 — 实现方案
 
-> 版本：**v2.1**（与 spec 同步：核心承诺修订为「默认完全离线 + 云同步显式可选」；多仓库/云同步的契约（§6 新增通道、§4 `warehouses[]`、`cloud_client` 唯一出口）随实现同时写入，设计依据见 `docs/v2.0-更新提案.md`）
-> 日期：2026-10-16（v1.6；初稿 2026-10-15）
+> 版本：**v2.2**（与 spec 同步：新增 §6.2 `compare:sync_fields` 与 `compare:run.manual_matches`——缺料人工匹配 + 唯一显式字段同步通道，见 spec v2.2 FR-2.14/2.10/2.11）
+> 日期：2026-10-17（v2.2；初稿 2026-10-15）
 > 配套：`spec.md`（WHAT，验收唯一信源）
 > 定位：本文是实现的技术约束，**技术决策集中于此**
 
@@ -443,7 +443,7 @@ fs.renameSync(tmp, target)
 > 幂等表在进程内（重启清空）；重新解析后会得到新的 `batch_id`，那是合法的新操作。
 > 两层闸门：页面「确认入库」按钮在请求在飞时 disabled（`state.busy`）+ 服务端拒绝重复提交。
 
-### 6.2 比对（只读）
+### 6.2 比对（默认只读）
 
 ```markdown
 ### compare:run
@@ -452,6 +452,7 @@ fs.renameSync(tmp, target)
 | 请求 | file_path | string | 是 | 待比对 BOM |
 | 请求 | sets | number | 否 | 套数（默认 1）；需求 = 单套数量 × sets |
 | 请求 | rulings | object | 否 | **v2.12 人工裁决**：`{ 行号: "same" \| "different" }`；same = 确认同一颗（按候选库存算缺口）、different = 不是同一颗（按缺料算）；未裁决/非法值仍留疑似。**只重分组，不写库** |
+| 请求 | manual_matches | object | 否 | **v2.13 人工匹配**：`{ 行号: 器件id }`（spec FR-2.14）。只对 `match_reason = none / confirmed_different` 的缺料行生效；按被匹配器件库存判定够用/缺料。**只重分组，不写库**；字段同步是另一个显式通道 `compare:sync_fields` |
 | 响应 | ok | boolean | - | 是否成功 |
 | 响应 | compare_id | string | - | 本次比对号 |
 | 响应 | enough | CompareItem[] | - | **够用**（库中已有且库存 ≥ 需求） |
@@ -482,6 +483,19 @@ fs.renameSync(tmp, target)
 >    `compare:export` 导出的就是界面所见；**不写库、不产生变动记录**（FR-2.5/2.6 不变，验收仍用字节比对）。
 > 前端防重入：比对请求在飞时 `state.busy` 挡住重复确认（避免晚到的旧结果覆盖新裁决）。
 
+> **v2.13（2026-10-17，用户需求：缺料允许人工匹配库里器件 + 可选字段同步）**：
+> ① **疑似只是中间分组**：确认/否定之后按库存进「够用/缺料」，且在够用/缺料组里**保留两个确认键可直接改选**、
+>    「改判」可退回疑似（spec FR-2.16）——此前已确认行只剩「改判」，用户要求保留改选能力。
+> ② **人工匹配**（`applyManualMatches`，服务端唯一实现）：只允许 `match_reason = none / confirmed_different`
+>    的缺料行（即"库里根本没这颗料"或"疑似被否定"）；**已匹配上只是库存不足的不允许**。
+>    匹配后库存 = 被匹配器件库存、缺口 = max(0, 需求 − 库存)，按缺口进够用/缺料；
+>    `match_reason = "manual_match"`、`confirmed_by_human = true`，带候选身份快照。
+>    匹配关系只存在当前这份比对结果里（不持久化），可「退回」。
+> ③ **字段同步（比对侧唯一写库动作）**：另开通道 `compare:sync_fields`（见下），
+>    把 BOM 行判定键五字段的**有效值**（归一后的规范写法）同步到被匹配器件。
+>    必须**先预览旧值→新值**，`confirm !== true` 时一个字节都不写；写库 = 改该器件五字段 +
+>    一条 movements（`adjust`，delta=0，before=after=当前数量）留痕；`compare:run` / `compare:export` 仍只读。
+
 ### CompareItem
 | 方向 | 字段 | 类型 | 说明 |
 |------|------|------|------|
@@ -502,7 +516,7 @@ fs.renameSync(tmp, target)
 | 响应 | matched_part_id | string | 匹配到的库中器件 id（无则空） |
 | 响应 | stock_quantity | number | 库中现有数量（无则 0） |
 | 响应 | shortfall_quantity | number | **缺口 = max(0, required − stock)**；导出时即 spec §4.2 的 **`purchase_quantity`**（需采购数量） |
-| 响应 | match_reason | string | **exact / mpn / partial / confirmed_same / confirmed_different / none**（partial 进 uncertain；**mpn = 按型号匹配**，v2.11；confirmed_* = 人工裁决后，v2.12） |
+| 响应 | match_reason | string | **exact / mpn / partial / confirmed_same / confirmed_different / manual_match / none**（partial 进 uncertain；**mpn = 按型号匹配**，v2.11；confirmed_* = 人工裁决后，v2.12；manual_match = 人工匹配后，v2.13） |
 | 响应 | missing_fields | string[] | 键字段缺失项（导致进 uncertain） |
 | 响应 | candidate_value | string | **v2.12 疑似行的候选身份快照**：库里候选的值（只有 uncertain 行非空） |
 | 响应 | candidate_footprint | string | 候选封装 |
@@ -511,7 +525,7 @@ fs.renameSync(tmp, target)
 | 响应 | candidate_tolerance | string | 候选容差 |
 | 响应 | candidate_part_number | string | 候选型号 |
 | 响应 | candidate_supplier_part | string | 候选供应商编号 |
-| 响应 | confirmed_by_human | boolean | **v2.12 是否经人工裁决**（只有 confirmed_same / confirmed_different 行为 true） |
+| 响应 | confirmed_by_human | boolean | **v2.12 是否经人工裁决**（confirmed_same / confirmed_different / manual_match 行为 true） |
 
 ### compare:export
 | 方向 | 字段 | 类型 | 必填 | 说明 |
@@ -527,10 +541,31 @@ fs.renameSync(tmp, target)
 > **v1.2 修正**：原契约的 `format`（xlsx/csv）与 Q6 定的"**xlsx + 两种模式**"不符——
 > 格式固定 xlsx，变化的是**模式**（lcsc/jlc）。另：导出行的"数量"列取
 > `shortfall_quantity`（不是 `required_quantity`），见 spec §4.2 v1.2 关键修正。
+
+### compare:sync_fields
+| 方向 | 字段 | 类型 | 必填 | 说明 |
+|------|------|------|------|------|
+| 请求 | part_id | string | 是 | 被匹配的库中器件 id |
+| 请求 | row_no | number | 否 | 来源比对行号（写进留痕理由，便于按行追溯） |
+| 请求 | fields | object | 是 | BOM 侧判定键五字段的有效值 `{ value, footprint, voltage, dielectric, tolerance }`；空串/缺失=不动库里原值 |
+| 请求 | confirm | boolean | 否 | **闸门**：未显式传 `true` 时**只返回预览，不写库**；`true` 才落库 |
+| 响应 | ok | boolean | - | 是否成功 |
+| 响应 | applied | boolean | - | 是否真的写了库（预览/无差异时为 false） |
+| 响应 | changes | object[] | - | `[{ field, from, to }]`：旧值 → 归一后的规范新值 |
+| 响应 | part | Part | - | 写后（或当前）的器件记录 |
+| 响应 | movement | object | - | applied=true 时的变动记录（adjust，delta=0） |
+
+> **v2.13 说明**：这是**比对侧唯一允许写库的通道**（spec FR-2.15），必须同时满足
+> "用户先在界面上看过旧值→新值的预览" + "本请求显式 confirm=true" 两个条件。
+> 写库范围只有判定键五字段；落库顺序与 `parts:save` 相同（先写 movements 再写 parts，失败补偿）。
+> 改完若与库中另一条器件同判定键 → 拒绝（正常路径不会发生，防御并发/手改数据）。
+> 验收：`confirm` 未传 true 时库文件字节不变；`confirm=true` 时 parts 变化 + 恰好一条 adjust 留痕。
 ```
 
 > **契约约束**：`compare:run` 与 `compare:export` **不得**触发任何写库操作。
 > 验收时用「比对前后库文件字节比对」证明（spec AC-2 FR-2.5）。
+> **唯一例外**（spec FR-2.15，v2.13）：`compare:sync_fields` 在用户**看过预览并显式确认**后，
+> 可同步被匹配器件的判定键五字段并写一条 `adjust`（delta=0）留痕；`confirm` 未传 true 时必须零写入。
 
 ### 6.3 器件、库存与领料
 
@@ -796,7 +831,7 @@ component_management/                 ← 项目根（协作工作区）
 │   └── settings.json
 ├── tests/
 │   ├── run_all.js                    ← 一条命令跑完全部套件（扫描 tests/test_*.js 自动发现）
-│   ├── test_*.js                     ← 24 个套件（含 AC-1~AC-9 全流程验收、NFR 实测、AC 覆盖率审计、页面级 DOM 测试）
+│   ├── test_*.js                     ← 47 个套件（含 AC-1~AC-10 全流程验收、NFR 实测、AC 覆盖率审计、架构静态检查、页面级 DOM 测试）
 │   ├── fake_dom.js                   ← 手写极简 DOM（零依赖），供页面级测试把 renderer 脚本真跑起来
 │   └── fixtures/                     ← 测试用 BOM（复制自 E:\bom）
 └── tools/
@@ -918,6 +953,7 @@ XML 转义稍错就让 Excel/立创打不开，而**失败是静默的**（文�
 
 | 日期 | 版本 | 变更 |
 |---|---|---|
+| 2026-10-17 | **v2.2** | **比对页「缺料人工匹配 + 可选字段同步」**（用户需求；spec v2.2 同步）：①`compare:run` 新增请求字段 `manual_matches`（只对 `none` / `confirmed_different` 的缺料行生效，按被匹配器件库存判定够用/缺料，只重分组不写库）；②**新增通道 `compare:sync_fields`**（`confirm !== true` 只预览、零写入；`confirm=true` 才把 BOM 判定键五字段的规范值同步进被匹配器件，并写一条 `adjust`（delta=0）留痕）——这是**比对侧唯一允许写库的通道**，`compare:run` / `compare:export` 仍只读；③`CompareItem.match_reason` 增 `manual_match`、`confirmed_by_human` 覆盖人工匹配；④疑似改为**中间分组**语义：确认/否定后进够用/缺料，且保留两个确认键可直接改选、「改判」退回疑似；⑤同步更新 spec（FR-2.14/2.10/2.11、AC-2 增 5 行、spec v2.2）与本文件 §6.2 契约。 |
 | 2026-10-15 | v1.0 | 初稿，依据 4 份真实 BOM 实测 |
 | 2026-10-15 | **v1.1** | 需求确认：①唯一性扩为**五元组**（+容差）并按 **AML 模式支持多 MPN**（附行业依据）；②**新增出库/领用**（T13 升 P0）；③套数不记忆（移除 `remember_sets`）；④阈值**按分类预置**（14 类）；⑤"信号"澄清为**用途 `purpose`**；⑥导出定 **xlsx 且立创可识别**（新增 T13b/T13c，含官方格式硬约束） |
 | 2026-10-15 | **v1.1.1** | Q5 终澄清：用户原写"信号"是**笔误，实为「型号」（MPN）**。删除 `purpose`/`net` 字段设想（型号已在数据模型）；修复数据模型示例中 `category` 键重复的 JSON 错误 |

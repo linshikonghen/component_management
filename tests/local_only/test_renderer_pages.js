@@ -1043,6 +1043,144 @@ t("比对页：疑似行有**确认键**且标清库里候选；「是同一颗�
   assert.ok(/已确认：不是同一颗/.test(box().textContent), "缺料组里要标出人工确认结果");
 });
 
+t("比对页：缺料行「人工匹配」→ 选「只本次匹配」→ 按库存进够用 + 已手动匹配；退回；库文件不变", async () => {
+  const env = freshEnv(MAIN_BOM);
+  // 造一条和 BOM 各行都对不上的料（22uF/0603；BOM 里 22uF 行的封装是 C1206）
+  const saved = await env.handlers["parts:save"]({ part: { value: "22uF", footprint: "0603", quantity: 999 } });
+  assert.strictEqual(saved.ok, true, saved.error);
+  const partsBefore = fs.readFileSync(env.db.paths().parts);
+
+  const { sandbox, doc } = createPageSandbox(env.handlers);
+  runScript(sandbox, "renderer/pages/compare_report.js");
+  const host = doc.createElement("div");
+  host.id = "compare-manual-match";
+  doc.body.appendChild(host);
+  sandbox.ComparePage.mount(host);
+  await tick();
+
+  doc.querySelectorAll("#compare-body button")[0].click(); // 选择文件
+  await tick();
+  doc.getElementById("compare-start").click();
+  await tick(); await tick();
+
+  const box = () => doc.getElementById("compare-body");
+  const open = buttonByText(box(), "人工匹配…");
+  assert.ok(open, "缺料行必须有「人工匹配…」按钮");
+  open.click();
+  await tick();
+  assert.ok(doc.getElementById("match-picker-mask"), "应弹出器件选择器");
+  const options = doc.querySelectorAll("#match-list button");
+  assert.ok(options.length >= 1, "选择器里应有候选项");
+  options[0].click();
+  await tick(); await tick();
+  assert.ok(doc.getElementById("dialog-mask"), "应弹「要不要同步字段」询问");
+  doc.getElementById("dialog-option-1").click(); // 只本次匹配，不替换
+  await tick(); await tick(); await tick();
+
+  assert.ok(partsBefore.equals(fs.readFileSync(env.db.paths().parts)), "选「不替换」→ 库文件必须字节不变");
+  assert.ok(/已人工匹配 1 条缺料/.test(box().textContent), "页面要说明已人工匹配的条数");
+  buttonByText(box(), "够用").click();
+  await tick();
+  assert.ok(/已手动匹配/.test(box().textContent), "匹配后按库存进够用组并标「已手动匹配」");
+
+  // 退回：弹确认（提示已同步字段不回滚），确认后回到未匹配缺料
+  buttonByText(box(), "退回").click();
+  await tick(); await tick();
+  assert.ok(doc.getElementById("dialog-mask"), "退回应弹确认框（提示后果）");
+  doc.getElementById("dialog-ok").click();
+  await tick(); await tick(); await tick();
+  assert.ok(/人工匹配…/.test(box().textContent), "退回后回到未匹配的缺料行（可再次人工匹配）");
+});
+
+t("比对页：人工匹配选「替换并写库」→ 判定键字段同步 + 一条 adjust 留痕（数量不变）", async () => {
+  const env = freshEnv(MAIN_BOM);
+  const saved = await env.handlers["parts:save"]({ part: { value: "22uF", footprint: "0603", quantity: 7 } });
+  assert.strictEqual(saved.ok, true, saved.error);
+  const movesBefore = env.db.loadMovements().length;
+
+  const { sandbox, doc } = createPageSandbox(env.handlers);
+  runScript(sandbox, "renderer/pages/compare_report.js");
+  const host = doc.createElement("div");
+  host.id = "compare-manual-match-sync";
+  doc.body.appendChild(host);
+  sandbox.ComparePage.mount(host);
+  await tick();
+  doc.querySelectorAll("#compare-body button")[0].click();
+  await tick();
+  doc.getElementById("compare-start").click();
+  await tick(); await tick();
+
+  const box = () => doc.getElementById("compare-body");
+  buttonByText(box(), "人工匹配…").click();
+  await tick();
+  doc.querySelectorAll("#match-list button")[0].click();
+  await tick(); await tick();
+  assert.ok(doc.getElementById("dialog-mask"), "应弹字段同步询问");
+  const dialogText = doc.getElementById("dialog-mask").textContent;
+  assert.ok(/值：「/.test(dialogText) && /→/.test(dialogText), "弹窗要展示旧值→新值预览：" + dialogText.slice(0, 160));
+  doc.getElementById("dialog-ok").click(); // 替换并写库
+  await tick(); await tick(); await tick();
+
+  const part = env.db.loadParts().find((p) => p.id === saved.part.id);
+  assert.ok(part, "器件应还在");
+  assert.notStrictEqual(part.value, "22uF", "BOM 第一行的值（10uF）应同步进来：" + part.value);
+  assert.strictEqual(part.value, "10uF");
+  assert.strictEqual(part.footprint, "1210", "C1210 → 规范写法 1210");
+  assert.strictEqual(part.quantity, 7, "数量不得被改");
+  const moves = env.db.loadMovements();
+  assert.strictEqual(moves.length, movesBefore + 1, "应恰好写一条变动记录");
+  const m = moves[moves.length - 1];
+  assert.strictEqual(m.kind, "adjust");
+  assert.strictEqual(m.delta, 0);
+  assert.strictEqual(m.before, 7);
+  assert.strictEqual(m.after, 7);
+  assert.ok(/比对页人工匹配同步字段/.test(m.reason), m.reason);
+  assert.ok(/已把 2 个字段同步到库里的/.test(box().textContent), "页面要显示同步结果");
+});
+
+t("比对页：疑似是中间分组——确认后保留两个按钮可改选；否定进缺料后可人工匹配；改判回疑似", async () => {
+  const env = freshEnv(MAIN_BOM);
+  await env.handlers["parts:save"]({ part: { value: "10uF", footprint: "1210", tolerance: "±10%", quantity: 999 } });
+  const { sandbox, doc } = createPageSandbox(env.handlers);
+  runScript(sandbox, "renderer/pages/compare_report.js");
+  const host = doc.createElement("div");
+  host.id = "compare-mid-state";
+  doc.body.appendChild(host);
+  sandbox.ComparePage.mount(host);
+  await tick();
+  doc.querySelectorAll("#compare-body button")[0].click();
+  await tick();
+  doc.getElementById("compare-start").click();
+  await tick(); await tick();
+
+  const box = () => doc.getElementById("compare-body");
+  buttonByText(box(), "疑似").click();
+  await tick();
+  buttonByText(box(), "是同一颗（按库存算）").click();
+  await tick(); await tick();
+
+  // 进了够用组，但两个确认按钮都还在（当前选择置灰，另一个可点=可直接改选）
+  buttonByText(box(), "够用").click();
+  await tick();
+  assert.ok(/已确认：同一颗/.test(box().textContent), "够用组里应保留状态");
+  const sameBtn = buttonByText(box(), "是同一颗（按库存算）");
+  const diffBtn = buttonByText(box(), "不是同一颗（算缺料）");
+  assert.ok(sameBtn && diffBtn, "已确认行必须保留两个确认按钮");
+  assert.strictEqual(sameBtn.disabled, true, "当前选择（同一颗）应置灰");
+  assert.strictEqual(diffBtn.disabled, false, "另一个按钮应可点（直接改选）");
+
+  diffBtn.click();
+  await tick(); await tick();
+  buttonByText(box(), "缺料").click();
+  await tick();
+  assert.ok(/已确认：不是同一颗/.test(box().textContent), "改选后进入缺料组");
+  assert.ok(buttonByText(box(), "人工匹配…"), "被否定的缺料行也要给人工匹配入口");
+
+  buttonByText(box(), "改判").click();
+  await tick(); await tick();
+  assert.ok(/疑似/.test(box().textContent), "改判后退回疑似分组");
+});
+
 t("比对页：没选文件就点「开始比对」→ 页面显示错误（不静默、不白屏）", async () => {
   const env = freshEnv(MAIN_BOM);
   const { sandbox, doc } = createPageSandbox(env.handlers);

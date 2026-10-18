@@ -20,6 +20,9 @@ const PLAN_CHANNELS = [
   "bom:commit",
   "compare:run",
   "compare:export",
+  // 比对页「人工匹配后同步判定键字段」（spec FR-2.14/2.10；用户 2026-10-17 需求）：
+  // confirm=false 只返回"旧值→新值"预览；confirm=true 才落库并留痕（两层闸门）
+  "compare:sync_fields",
   "parts:list",
   "parts:save",
   "parts:delete",

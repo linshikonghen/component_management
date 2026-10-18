@@ -106,7 +106,8 @@ t("实际通道集合 == plan §6 ∪ **已登记的契约扩展**（多一个�
   // v1.5（实现期补记 2）后登记表已清空——parts:export 并入 §6，于是这里等价于"== plan §6"。
   const fromPlan = channelsFromPlan();
   // v1.7：新增 statement:parse / statement:commit → 16 → 18
-  assert.strictEqual(fromPlan.length, 18, "plan §6 应定义 18 个通道，实际解析到 " + fromPlan.length);
+  // v2.13：新增 compare:sync_fields（比对页人工匹配后的字段同步）→ 18 → 19
+  assert.strictEqual(fromPlan.length, 19, "plan §6 应定义 19 个通道，实际解析到 " + fromPlan.length);
   const expected = fromPlan.concat(extensions.EXTENSION_CHANNELS).sort();
   assert.deepStrictEqual(CHANNELS.slice().sort(), expected,
     "通道与「plan §6 + 已登记扩展」不一致：多了没登记的，或登记了却没实现");
@@ -276,6 +277,132 @@ t("compare:export 不指定路径 → 默认文件名含时间戳（FR-2.8）", 
   assert.strictEqual(r.ok, true, r.error);
   assert.ok(/立创配单_\d{8}_\d{6}\.xlsx$/.test(r.file_path), r.file_path);
   fs.rmSync(r.file_path, { force: true });
+});
+
+/* ====================== §3b 人工匹配 + 字段同步（spec v2.2 / plan v2.13） */
+
+t("compare:run 支持人工匹配 manual_matches：按被匹配器件库存分组，库文件不动", async () => {
+  const { handlers, db } = freshEnv();
+  // 库里造一条"和 BOM 对不上"的料：BOM 里 22uF 行的封装是 C1206，这条是 0603
+  const saved = await handlers["parts:save"]({
+    part: { value: "22uF", footprint: "0603", voltage: "50V", dielectric: "X7R", tolerance: "±10%", quantity: 999 },
+  });
+  assert.strictEqual(saved.ok, true, saved.error);
+  const partsBefore = fs.readFileSync(db.paths().parts);
+  const movesBefore = fs.readFileSync(db.paths().movements);
+
+  const base = await handlers["compare:run"]({ file_path: BOM_PATH, sets: 1 });
+  const target = base.shortfall.find((x) => x.match_reason === "none");
+  assert.ok(target, "应有未匹配（none）的缺料行");
+
+  const matched = await handlers["compare:run"]({
+    file_path: BOM_PATH, sets: 1,
+    manual_matches: { [target.row_no]: saved.part.id },
+  });
+  assert.strictEqual(matched.ok, true, matched.error);
+  const moved = matched.enough.concat(matched.shortfall).find((x) => x.row_no === target.row_no);
+  assert.ok(moved, "匹配后该行应进入够用/缺料（按库存）");
+  assert.strictEqual(moved.match_reason, "manual_match");
+  assert.strictEqual(moved.confirmed_by_human, true);
+  assert.strictEqual(moved.matched_part_id, saved.part.id);
+  assert.strictEqual(moved.stock_quantity, 999);
+  assert.ok(matched.enough.some((x) => x.row_no === target.row_no), "库存 999 ≥ 需求 → 进够用");
+  assert.ok(partsBefore.equals(fs.readFileSync(db.paths().parts)), "人工匹配本身不写库");
+  assert.ok(movesBefore.equals(fs.readFileSync(db.paths().movements)), "人工匹配不产生变动记录");
+});
+
+t("compare:run 拒绝给「已匹配上、只是库存不足」的缺料行做人工匹配", async () => {
+  const { handlers } = freshEnv();
+  // 造一条与 BOM 第一行**判定键完全相同**的料，库存 0 → 该行 exact 匹配但库存不足（= 不该人工匹配）
+  const parsed = await handlers["bom:parse"]({ file_path: BOM_PATH, sets: 1 });
+  const first = parsed.items[0];
+  const saved = await handlers["parts:save"]({
+    part: {
+      value: first.value, footprint: first.footprint, voltage: first.voltage,
+      dielectric: first.dielectric, tolerance: first.tolerance, quantity: 0,
+    },
+  });
+  assert.strictEqual(saved.ok, true, saved.error);
+  const base = await handlers["compare:run"]({ file_path: BOM_PATH, sets: 1 });
+  const insufficient = base.shortfall.find((x) => x.row_no === first.row_no);
+  assert.ok(insufficient, "第一行应因库存 0 进缺料");
+  assert.strictEqual(insufficient.match_reason, "exact", "应为已匹配（exact）但库存不足");
+  const r = await handlers["compare:run"]({
+    file_path: BOM_PATH, sets: 1,
+    manual_matches: { [first.row_no]: saved.part.id },
+  });
+  assert.strictEqual(r.ok, false);
+  assert.ok(/不能人工匹配/.test(r.error), r.error);
+});
+
+t("compare:sync_fields：confirm 未传 true → 只预览，库文件与变动记录一个字节不动", async () => {
+  const { handlers, db } = freshEnv();
+  const saved = await handlers["parts:save"]({
+    part: { value: "22uF", footprint: "0603", voltage: "", dielectric: "", tolerance: "", quantity: 5 },
+  });
+  const partsBefore = fs.readFileSync(db.paths().parts);
+  const movesBefore = fs.readFileSync(db.paths().movements);
+  const preview = await handlers["compare:sync_fields"]({
+    part_id: saved.part.id, row_no: 3,
+    fields: { value: "22uF", footprint: "C1206", voltage: "50V", dielectric: "X7R", tolerance: "±10%" },
+    confirm: false,
+  });
+  assert.strictEqual(preview.ok, true, preview.error);
+  assert.strictEqual(preview.applied, false);
+  const byField = {};
+  for (const c of preview.changes) byField[c.field] = c;
+  assert.strictEqual(byField.footprint.to, "1206", "封装要写成规范写法（EDA 修饰去掉）");
+  assert.strictEqual(byField.voltage.to, "50V");
+  assert.deepStrictEqual(preview.changes.map((c) => c.field).sort(),
+    ["dielectric", "footprint", "tolerance", "voltage"]);
+  assert.ok(partsBefore.equals(fs.readFileSync(db.paths().parts)), "预览不得写库");
+  assert.ok(movesBefore.equals(fs.readFileSync(db.paths().movements)), "预览不得写变动记录");
+});
+
+t("compare:sync_fields confirm=true → 写判定键五字段 + 一条 adjust（delta=0）留痕；数量不动", async () => {
+  const { handlers, db } = freshEnv();
+  const saved = await handlers["parts:save"]({ part: { value: "22uF", footprint: "0603", quantity: 7 } });
+  const movesBefore = db.loadMovements().length;
+  const applied = await handlers["compare:sync_fields"]({
+    part_id: saved.part.id, row_no: 3,
+    fields: { value: "0.022mF", footprint: "C1206", voltage: "50V", dielectric: "X7R", tolerance: "+/-10%" },
+    confirm: true,
+  });
+  assert.strictEqual(applied.ok, true, applied.error);
+  assert.strictEqual(applied.applied, true);
+  const part = db.loadParts().find((p) => p.id === saved.part.id);
+  assert.strictEqual(part.value, "22uF", "0.022mF 归一后 = 22uF");
+  assert.strictEqual(part.footprint, "1206");
+  assert.strictEqual(part.voltage, "50V");
+  assert.strictEqual(part.dielectric, "X7R");
+  assert.strictEqual(part.tolerance, "±10%");
+  assert.strictEqual(part.quantity, 7, "数量不动");
+  const moves = db.loadMovements();
+  assert.strictEqual(moves.length, movesBefore + 1);
+  const m = moves[moves.length - 1];
+  assert.strictEqual(m.part_id, saved.part.id);
+  assert.strictEqual(m.kind, "adjust");
+  assert.strictEqual(m.delta, 0);
+  assert.strictEqual(m.before, 7);
+  assert.strictEqual(m.after, 7);
+  assert.ok(/比对页人工匹配同步字段/.test(m.reason), m.reason);
+  assert.ok(/比对第 3 行/.test(m.reason), "留痕要写来源行号：" + m.reason);
+});
+
+t("compare:sync_fields 异常：器件不存在 / 改完会重复 → 明确报错且零写入", async () => {
+  const { handlers, db } = freshEnv();
+  const a = await handlers["parts:save"]({ part: { value: "22uF", footprint: "0603", quantity: 1 } });
+  await handlers["parts:save"]({ part: { value: "47uF", footprint: "0805", quantity: 1 } });
+  const before = fs.readFileSync(db.paths().parts);
+  const missing = await handlers["compare:sync_fields"]({ part_id: "p_nope", fields: { value: "1uF" }, confirm: true });
+  assert.strictEqual(missing.ok, false);
+  // 把 A 改成与库里另一条完全同规格 → 拒绝（唯一性防御）
+  const clash = await handlers["compare:sync_fields"]({
+    part_id: a.part.id, fields: { value: "47uF", footprint: "0805" }, confirm: true,
+  });
+  assert.strictEqual(clash.ok, false);
+  assert.ok(/同规格|重复/.test(clash.error), clash.error);
+  assert.ok(before.equals(fs.readFileSync(db.paths().parts)), "拒绝时不得改库");
 });
 
 /* ======================================================== §4 器件 */

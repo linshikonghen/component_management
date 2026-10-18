@@ -203,14 +203,23 @@ t("比对页也不调用出/入库通道（stock:move），避免顺手写库", 
   assert.ok(!/stock:move|stockMove/.test(src), "比对页不得出现 stock:move 引用");
 });
 
-t("比对页只允许调用这几个只读/导出通道", () => {
+t("比对页只允许调用这几个通道（新增通道必须在此登记用途）", () => {
   const src = readIfExists("renderer/pages/compare_report.js");
   const calls = [...src.matchAll(/call\(\s*"([A-Za-z]+)"/g)].map((m) => m[1]);
   assert.ok(calls.length > 0, "没解析到 IPC 调用，检查写法是否变了");
-  const allowed = new Set(["bomPickFiles", "compareRun", "compareExport"]);
+  const allowed = new Set([
+    "bomPickFiles", // 选 BOM（只读）
+    "compareRun", // 比对 + 人工裁决/人工匹配（只重分组，不写库）
+    "compareExport", // 导出（只写用户指定文件）
+    "partsList", // v2.2 人工匹配的器件选择器（只读）
+    "compareSyncFields", // v2.2 唯一可写库的通道：人工匹配后同步判定键字段（confirm=true 才写）
+  ]);
   for (const name of calls) {
     assert.ok(allowed.has(name), `比对页调用了未授权的通道：${name}（只允许 ${[...allowed].join(" / ")}）`);
   }
+  // 写库通道在页面里必须"预览一次（confirm:false）+ 确认后才写（confirm:true）"——两层闸门的前端一半
+  assert.ok(/compareSyncFields/.test(src) && /confirm:\s*false/.test(src) && /confirm:\s*true/.test(src),
+    "compareSyncFields 必须同时有预览调用与确认调用");
   console.log(`        （比对页实际调用：${[...new Set(calls)].join(" / ")}）`);
 });
 
@@ -298,6 +307,42 @@ t("疑似行要标清\"疑似的是什么\"：库里候选一句话身份 + 原�
   assert.strictEqual(
     model.uncertainReason({ missing_fields: ["tolerance"], candidate_tolerance: "±10%" }),
     "BOM 缺 容差（库里候选：容差「±10%」），无法精确判定",
+  );
+});
+
+t("人工匹配的界面规则：哪些缺料行可以匹配、状态文案、字段同步预览文案", () => {
+  // 可匹配：库里没这颗（none）/ 疑似被否定（confirmed_different）
+  assert.strictEqual(model.isManualMatchable({ match_reason: "none" }), true);
+  assert.strictEqual(model.isManualMatchable({ match_reason: "confirmed_different" }), true);
+  // 不可匹配：已匹配上只是库存不足 / 已经人工匹配过 / 疑似未裁决
+  for (const reason of ["exact", "mpn", "confirmed_same", "manual_match", "partial"]) {
+    assert.strictEqual(model.isManualMatchable({ match_reason: reason }), false, reason + " 不应给人工匹配入口");
+  }
+  // 状态文案
+  assert.strictEqual(model.decisionText({ match_reason: "confirmed_same" }), "已确认：同一颗");
+  assert.strictEqual(model.decisionText({ match_reason: "confirmed_different" }), "已确认：不是同一颗");
+  assert.strictEqual(model.decisionText({ match_reason: "manual_match" }), "已手动匹配");
+  assert.strictEqual(model.decisionText({ match_reason: "none" }), "");
+  // 取判定键五字段（BOM 侧值；null → 空串）
+  assert.deepStrictEqual(
+    model.keyFieldsOf({ value: "10uF", footprint: "C1210", voltage: null, dielectric: "X7R", tolerance: "±10%" }),
+    { value: "10uF", footprint: "C1210", voltage: "", dielectric: "X7R", tolerance: "±10%" },
+  );
+  // 同步预览逐行文案（空值显示"（空）"）
+  assert.deepStrictEqual(
+    model.formatFieldChanges([
+      { field: "value", from: "10uF", to: "100nF" },
+      { field: "voltage", from: "", to: "50V" },
+    ]),
+    ["值：「10uF」→「100nF」", "耐压：「（空）」→「50V」"],
+  );
+  assert.deepStrictEqual(model.formatFieldChanges(null), []);
+  assert.strictEqual(
+    model.manualMatchText({
+      match_reason: "manual_match",
+      candidate_value: "10uF", candidate_footprint: "1210", stock_quantity: 4,
+    }),
+    "已手动匹配：10uF / 1210（库存 4）",
   );
 });
 

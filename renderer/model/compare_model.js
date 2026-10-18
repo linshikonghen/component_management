@@ -129,12 +129,16 @@
     return `需求 ${toInt(it.required_quantity)} · 库存 ${toInt(it.stock_quantity)} · 缺口 ${toInt(it[PURCHASE_FIELD])}`;
   }
 
+  /** 判定键字段中文名（与 services/compare.js 的 KEY_FIELD_LABELS 同口径；展示层唯一定义处） */
+  const FIELD_LABELS = { value: "值", footprint: "封装", voltage: "耐压", dielectric: "材质", tolerance: "容差" };
+  const KEY_FIELDS = ["value", "footprint", "voltage", "dielectric", "tolerance"];
+
   /** 疑似条目为什么进疑似（missing_fields 为空则是"库中有相似条目"）；
    *  有候选快照时把"候选那边是什么"也写出来（用户反馈：只说"待人工确认"没说清疑似的是什么）。 */
   function uncertainReason(item) {
     const it = item || {};
     const missing = it.missing_fields || [];
-    const labels = { voltage: "耐压", dielectric: "材质", tolerance: "容差", value: "值", footprint: "封装" };
+    const labels = FIELD_LABELS;
     if (missing.length === 0) return "库中有相似条目，但无法确认是同一种料";
     const missingText = missing.map((f) => labels[f] || f).join("、");
     const candOf = {
@@ -150,6 +154,49 @@
     return details.length > 0
       ? `BOM 缺 ${missingText}（库里候选：${details.join("、")}），无法精确判定`
       : `BOM 缺 ${missingText}，无法精确判定`;
+  }
+
+  /** 取一行里判定键五字段的 BOM 侧值（人工匹配后的字段同步用） */
+  function keyFieldsOf(item) {
+    const it = item || {};
+    const out = {};
+    for (const field of KEY_FIELDS) out[field] = String(it[field] == null ? "" : it[field]).trim();
+    return out;
+  }
+
+  /**
+   * 缺料行是否允许人工匹配（与 services/compare.isManualMatchable 同一规则；服务端还有一道同样的检查）：
+   *   · `none`（库里根本没这颗料）/ `confirmed_different`（疑似被人工否定）→ 可以；
+   *   · `exact` / `mpn` / `confirmed_same` / `manual_match` 但库存不足 → **不可以**（那已经匹配上了，是数量问题）。
+   */
+  function isManualMatchable(item) {
+    const it = item || {};
+    return it.match_reason === "none" || it.match_reason === "confirmed_different";
+  }
+
+  /** 已处理行的状态文案（疑似确认后 / 人工匹配后，都留在够用/缺料组里可改） */
+  function decisionText(item) {
+    const it = item || {};
+    if (it.match_reason === "confirmed_same") return "已确认：同一颗";
+    if (it.match_reason === "confirmed_different") return "已确认：不是同一颗";
+    if (it.match_reason === "manual_match") return "已手动匹配";
+    return "";
+  }
+
+  /** 字段同步预览逐行文案：`值：「10uF」→「100nF」`（空值显示"（空）"） */
+  function formatFieldChanges(changes) {
+    const list = Array.isArray(changes) ? changes : [];
+    return list.map((c) => {
+      const label = FIELD_LABELS[c.field] || c.field;
+      const from = String(c.from == null ? "" : c.from).trim();
+      const to = String(c.to == null ? "" : c.to).trim();
+      return `${label}：「${from === "" ? "（空）" : from}」→「${to}」`;
+    });
+  }
+
+  /** 人工匹配行在处置列的一句话（被匹配器件身份 + 库存） */
+  function manualMatchText(item) {
+    return `已手动匹配：${candidateText(item)}`;
   }
 
   /** 库里候选器件的一句话身份：疑似行要明确"疑似的是哪条候选"（值/封装/耐压/容差/型号/库存） */
@@ -181,6 +228,11 @@
     quantityLine,
     uncertainReason,
     candidateText,
+    keyFieldsOf,
+    isManualMatchable,
+    decisionText,
+    formatFieldChanges,
+    manualMatchText,
   };
 
   if (typeof module !== "undefined" && module.exports) module.exports = api;

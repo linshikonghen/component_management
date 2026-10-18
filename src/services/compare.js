@@ -16,11 +16,17 @@
  *   缺口 shortfall = max(0, required − 库存)
  *   需 24 有 3 → 缺口 **21**（不是 24）。旧语义会漏掉库存不足的缺口，违背"只补缺的"。
  *
+ * v2.2（用户 2026-10-17 需求）：比对页新增「缺料行人工匹配」与「字段同步」。
+ *   本模块**依旧没有任何写能力**：`applyManualMatches` 只改这份结果的分组，
+ *   `buildFieldChanges` 只算"该把哪些字段改成什么"。真正写回库里器件是**另一个显式动作**，
+ *   由 IPC 层在用户预览+确认后调用 store 落库并留痕（spec FR-2.14/2.10 的唯一例外；
+ *   不改变 compare:run / compare:export 的只读性——验收仍用前后字节快照证明）。
+ *
  * 套数只在这里算一次：**刻意忽略 items 里的 total_quantity**（那是"解析时按套数算过的应入库量"）。
  * 若两个都乘，套数就被算了两遍——这类错误在界面上不显眼，但会让人买错数量。
  */
 
-const { normalizeValue, normalizeText, normalizeTolerance } = require("./spec_parser");
+const { normalizeValue, normalizeText, normalizeTolerance, parseValueToken } = require("./spec_parser");
 const ids = require("./ids");
 const { toInt, str } = require("./value_util");
 
@@ -168,6 +174,111 @@ function missingKeyFields(item) {
   return KEY_FIELDS.filter((f) => String(src[f] == null ? "" : src[f]).trim() === "");
 }
 
+/** 判定键字段的中文名（服务端留痕文案用；界面文案在 renderer/model 里另有一份展示层口径） */
+const KEY_FIELD_LABELS = { value: "值", footprint: "封装", voltage: "耐压", dielectric: "材质", tolerance: "容差" };
+
+/**
+ * 候选器件身份快照（**唯一实现**）：疑似行的"部分匹配候选"与人工匹配行的"被匹配器件"共用，
+ * 避免两处各自拼一遍字段名（字段漂移时界面会静默少显示一项）。
+ */
+function candidateSnapshot(part) {
+  const p = part || {};
+  return {
+    candidate_value: str(p.value),
+    candidate_footprint: str(p.footprint),
+    candidate_voltage: str(p.voltage),
+    candidate_dielectric: str(p.dielectric),
+    candidate_tolerance: str(p.tolerance),
+    candidate_part_number: str(p.part_number),
+    candidate_supplier_part: str(p.supplier_part),
+  };
+}
+
+/**
+ * 哪一类"缺料"允许人工匹配库里器件（用户 2026-10-17 裁定）：
+ *   · `none`              —— 库里根本没有这颗料（真·未匹配）；
+ *   · `confirmed_different` —— 疑似行被人工否定后归入缺料，同样属于"未匹配"。
+ * **不允许**：`exact`/`mpn`/`confirmed_same` 但库存不足的缺料（那是已经匹配上、只是库存不够，
+ * 人工匹配会让人误以为"换一颗"就能解决，实际是数量问题）；`manual_match` 自己也不能再匹配。
+ */
+function isManualMatchable(item) {
+  const it = item || {};
+  return it.match_reason === "none" || it.match_reason === "confirmed_different";
+}
+
+/**
+ * 写入库里的"规范值"（用户 2026-10-17 裁定：**写归一后的规范值**）。
+ * 注意与"判定用的归一"区分：判定要把大小写/空格/EDA 写法全抹平；落库要保留可读写法。
+ *   · 值：能解析成 数字+单位 → `100nF` / `10kΩ` 这类规范写法；认不出的（型号式值）保留原样写法
+ *   · 容差：能解析 → `±10%`；否则保留原样
+ *   · 封装：去掉 EDA 装饰（`R0603`→`0603`、`SOT-23_L…`→`SOT-23`、括号尺寸/`-EP`），**保留原大小写**
+ *   · 耐压/材质：保留原样（这两项归一只是用于比较，没有公认的"规范写法"）
+ */
+function canonicalFootprint(raw) {
+  let text = String(raw == null ? "" : raw).trim();
+  if (text === "") return "";
+  const underscore = text.indexOf("_");
+  if (underscore > 0) text = text.slice(0, underscore);
+  text = text.replace(/\([^)]*\)/g, "");
+  text = text.replace(/-EP$/i, "");
+  const chip = /^[A-Za-z]{1,3}(\d{3,4})$/.exec(text);
+  if (chip) return chip[1];
+  return text;
+}
+
+function canonicalValueForWrite(field, raw) {
+  const text = str(raw);
+  if (text === "") return "";
+  if (field === "value") {
+    const compact = text.replace(/\s+/g, "");
+    return parseValueToken(compact) ? normalizeValue(compact) : text;
+  }
+  if (field === "tolerance") return normalizeTolerance(text) || text;
+  if (field === "footprint") return canonicalFootprint(text);
+  return text; // voltage / dielectric
+}
+
+/**
+ * 计算"把 source 的有效值同步到 part"要做哪些字段替换（**纯函数，不落库**）。
+ *   · 只看判定键五字段；source（BOM 行）为空的字段跳过（不能把库里的值清空）；
+ *   · 归一后相同 = 无需替换（`C1210` 与 `1210`、`+/-10%` 与 `±10%` 不会产生无意义写入）；
+ *   · 返回的 `to` 是 [canonicalValueForWrite] 之后的规范写法。
+ * @param {object} part 库里被匹配的器件
+ * @param {object} source 比对行（判定键字段取 BOM 侧值）
+ * @returns {{ok:boolean, error:string, changes:Array<{field:string, from:string, to:string}>}}
+ */
+function buildFieldChanges(part, source) {
+  const target = part || {};
+  const src = source == null ? {} : source;
+  if (typeof src !== "object" || Array.isArray(src)) {
+    return { ok: false, error: "fields 必须是对象：{ value, footprint, voltage, dielectric, tolerance }", changes: [] };
+  }
+  const changes = [];
+  for (const field of KEY_FIELDS) {
+    const raw = str(src[field]);
+    if (raw === "") continue; // BOM 空 → 不动库里的原值
+    const from = str(target[field]);
+    if (normalizeKeyField(field, raw) === normalizeKeyField(field, from)) continue; // 归一后相同 = 已一致
+    changes.push({ field: field, from: from, to: canonicalValueForWrite(field, raw) });
+  }
+  return { ok: true, error: "", changes: changes };
+}
+
+/**
+ * 把 [buildFieldChanges] 的结果应用到一条器件上（**返回新对象，不改入参**）。
+ * 落库/留痕由 IPC 层完成（本模块没有写文件能力，见文件头）。
+ */
+function applyFieldChanges(part, changes) {
+  if (!Array.isArray(changes)) throw new Error("applyFieldChanges: changes 必须是数组");
+  const next = Object.assign({}, part || {});
+  for (const change of changes) {
+    const field = change && change.field;
+    if (!KEY_FIELDS.includes(field)) throw new Error(`不能同步字段「${field}」：只允许 ${KEY_FIELDS.join(" / ")}`);
+    next[field] = str(change.to);
+  }
+  return next;
+}
+
 /** 文本字段统一成"空串或去空格的字符串"（库里的 Part 字段可能是 null/undefined） */
 /**
  * 比对。
@@ -274,20 +385,11 @@ function compareBom(items, parts, sets = 1) {
     const partial = missing.length > 0 ? findPartialMatch(item, library, missing) : null;
     if (partial) {
       const stock = toInt(partial.quantity);
-      result.uncertain.push(Object.assign(base, {
+      result.uncertain.push(Object.assign(base, candidateSnapshot(partial), {
         matched_part_id: partial.id,
         stock_quantity: stock,
         match_reason: "partial",
         missing_fields: missing,
-        // **界面要把"疑似的是什么"标清楚**（用户反馈：只说"待人工确认"却没给确认键/没说清候选是谁）：
-        // 候选器件的身份快照（值/封装/耐压/材质/容差/型号/库存）。只读信息，不写库。
-        candidate_value: str(partial.value),
-        candidate_footprint: str(partial.footprint),
-        candidate_voltage: str(partial.voltage),
-        candidate_dielectric: str(partial.dielectric),
-        candidate_tolerance: str(partial.tolerance),
-        candidate_part_number: str(partial.part_number),
-        candidate_supplier_part: str(partial.supplier_part),
         // **疑似行也要按 spec §4.2 的公式算缺口**：数量列 = max(0, 需求 − 现有库存)。
         // 原来这里没算，于是勾选"连同疑似一起导出"时，最需要人看一眼的那几行数量列恒为 0
         // ——用户拿着它去下单，等于把"缺 21 个"写成"0 个"。
@@ -394,6 +496,79 @@ function applyRulings(result, rulings) {
   };
 }
 
+/**
+ * 人工匹配：把**未匹配的缺料行**（[isManualMatchable]）指定到库里的某条器件
+ * （用户 2026-10-17 需求：缺料允许人工匹配库里器件）。
+ *
+ * **仍然不写库**：只把"这一份比对结果"里该行改成按被匹配器件的库存算——
+ *   库存 = 被匹配器件库存；缺口 = max(0, 需求 − 库存)；够用/缺料按缺口分；
+ *   match_reason = "manual_match"、confirmed_by_human = true，并带候选身份快照。
+ * 字段同步（把 BOM 的值写进库里器件）是**另一个显式动作**（见 [buildFieldChanges]），
+ * 由 IPC 层在用户确认后落库并留痕（spec FR-2.14/2.10 的唯一例外）。
+ *
+ * 匹配关系**不持久化**：只存在当前这份结果里；重新比对若库里值没同步，同一行仍会缺料。
+ * @param {object} result applyRulings 之后的结果
+ * @param {object} manualMatches `{ [row_no]: part_id }`
+ * @param {Array<object>} parts 当前库存（用于取被匹配器件的库存/身份）
+ */
+function applyManualMatches(result, manualMatches, parts) {
+  const src = result || {};
+  const failure = (error) => ({
+    ok: false, error, compare_id: str(src.compare_id),
+    enough: [], shortfall: [], uncertain: [],
+    stats: { total: 0, enough: 0, shortfall: 0, uncertain: 0, no_stock: 0, insufficient: 0 },
+  });
+  const map = manualMatches == null ? {} : manualMatches;
+  if (typeof map !== "object" || Array.isArray(map)) {
+    return failure("manual_matches 必须是对象：{ 行号: 器件id }");
+  }
+  const byId = new Map();
+  for (const part of (Array.isArray(parts) ? parts : [])) {
+    if (part && str(part.id) !== "") byId.set(str(part.id), part);
+  }
+  const enough = (Array.isArray(src.enough) ? src.enough : []).slice();
+  const shortfall = [];
+  for (const item of (Array.isArray(src.shortfall) ? src.shortfall : [])) {
+    const targetId = str(map[item && item.row_no]);
+    if (targetId === "") { shortfall.push(item); continue; }
+    if (!isManualMatchable(item)) {
+      return failure(`第 ${item.row_no} 行不是"未匹配的缺料"（已匹配上、只是库存不足），不能人工匹配`);
+    }
+    const part = byId.get(targetId);
+    if (!part) {
+      return failure(`要匹配的器件不存在：${targetId}（可能已被删除），请重新选择`);
+    }
+    const stock = toInt(part.quantity);
+    const gap = Math.max(0, toInt(item.required_quantity) - stock);
+    const matched = Object.assign({}, item, candidateSnapshot(part), {
+      matched_part_id: part.id,
+      stock_quantity: stock,
+      shortfall_quantity: gap,
+      match_reason: "manual_match",
+      confirmed_by_human: true,
+    });
+    if (gap === 0) enough.push(matched);
+    else shortfall.push(matched);
+  }
+  const uncertain = (Array.isArray(src.uncertain) ? src.uncertain : []).slice();
+  return {
+    ok: true,
+    error: "",
+    compare_id: str(src.compare_id),
+    enough: enough,
+    shortfall: shortfall,
+    uncertain: uncertain,
+    stats: {
+      total: enough.length + shortfall.length + uncertain.length,
+      enough: enough.length,
+      shortfall: shortfall.length,
+      uncertain: uncertain.length,
+      no_stock: shortfall.filter((x) => toInt(x.stock_quantity) === 0).length,
+      insufficient: shortfall.filter((x) => toInt(x.stock_quantity) > 0).length,
+    },
+  };
+}
+
 /** `compare_YYYYMMDD_HHMMSS`（与 batch/pick 号同一形态，便于按 ref 追溯）——实现统一在 `./ids` */
 function makeCompareId(when) {
   return ids.makeRunId("compare", when);
@@ -401,6 +576,7 @@ function makeCompareId(when) {
 
 module.exports = {
   KEY_FIELDS,
+  KEY_FIELD_LABELS,
   GROUPS,
   normalizeFootprint,
   normalizeToleranceField,
@@ -408,7 +584,12 @@ module.exports = {
   normalizeKeyField,
   buildLibraryIndex,
   findLibraryMatch,
+  candidateSnapshot,
+  isManualMatchable,
+  buildFieldChanges,
+  applyFieldChanges,
   applyRulings,
+  applyManualMatches,
   dedupeKey,
   missingKeyFields,
   compareBom,
